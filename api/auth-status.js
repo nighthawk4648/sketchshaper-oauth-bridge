@@ -1,7 +1,8 @@
 // api/auth-status.js - Endpoint for SketchUp extension to poll authentication status
-
-// Import the auth sessions from callback (in production, use shared storage like Redis)
-import { authSessions } from './callback.js';
+// Access the shared global auth sessions (ensure it exists)
+if (!global.authSessions) {
+  global.authSessions = new Map();
+}
 
 export default async function handler(req, res) {
   // Enable CORS
@@ -24,9 +25,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'State parameter required' });
     }
 
-    // In a real implementation, you'd access shared storage here
-    // For now, we'll use a global Map (not ideal for serverless)
-    const session = global.authSessions?.get(state);
+    const session = global.authSessions.get(state);
 
     if (!session) {
       return res.status(404).json({ 
@@ -38,7 +37,7 @@ export default async function handler(req, res) {
     // Clean up old sessions (older than 5 minutes)
     const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
     if (session.timestamp < fiveMinutesAgo) {
-      global.authSessions?.delete(state);
+      global.authSessions.delete(state);
       return res.status(404).json({ 
         status: 'expired',
         message: 'Authentication session expired' 
@@ -55,11 +54,11 @@ export default async function handler(req, res) {
       response.code = session.code;
       response.state = state;
       // Clean up the session after successful retrieval
-      global.authSessions?.delete(state);
+      global.authSessions.delete(state);
     } else if (session.status === 'error') {
       response.error = session.error;
       // Clean up error sessions too
-      global.authSessions?.delete(state);
+      global.authSessions.delete(state);
     }
 
     console.log('Auth status checked for state:', state, 'Status:', session.status);
