@@ -5,7 +5,7 @@
   "main": "api/callback.js",
   "scripts": {
     "dev": "vercel dev",
-    "build": "vercel build",
+    "build": "echo 'No build necessary'",
     "deploy": "vercel --prod"
   },
   "dependencies": {},
