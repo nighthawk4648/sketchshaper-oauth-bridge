@@ -1,13 +1,5 @@
 {
   "version": 2,
-  "functions": {
-    "api/callback.js": {
-      "runtime": "nodejs18.x"
-    },
-    "api/auth-status.js": {
-      "runtime": "nodejs18.x"
-    }
-  },
   "rewrites": [
     {
       "source": "/callback",
