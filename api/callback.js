@@ -1,6 +1,6 @@
 // api/callback.js - Handles Patreon OAuth callback
-// Using global object to share state between functions (not ideal for production)
-if (!global.authSessions) {
+// Initialize global auth sessions if not exists
+if (typeof global.authSessions === 'undefined') {
   global.authSessions = new Map();
 }
 
