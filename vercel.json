@@ -8,14 +8,14 @@
       "runtime": "nodejs18.x"
     }
   },
-  "routes": [
+  "rewrites": [
     {
-      "src": "/callback",
-      "dest": "/api/callback"
+      "source": "/callback",
+      "destination": "/api/callback"
     },
     {
-      "src": "/auth-status",
-      "dest": "/api/auth-status"
+      "source": "/auth-status",
+      "destination": "/api/auth-status"
     }
   ],
   "headers": [
