@@ -1,0 +1,42 @@
+{
+  "version": 2,
+  "name": "sketchshaper-oauth-bridge",
+  "functions": {
+    "api/callback.js": {
+      "runtime": "@vercel/node@3.0.0"
+    }
+  },
+  "routes": [
+    {
+      "src": "/callback",
+      "dest": "/api/callback"
+    },
+    {
+      "src": "/health",
+      "dest": "/api/health"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        {
+          "key": "Access-Control-Allow-Origin",
+          "value": "*"
+        },
+        {
+          "key": "Access-Control-Allow-Methods",
+          "value": "GET, OPTIONS"
+        },
+        {
+          "key": "Access-Control-Allow-Headers",
+          "value": "Content-Type"
+        }
+      ]
+    }
+  ],
+  "env": {
+    "LOCAL_CALLBACK_PORT": "9090",
+    "LOCAL_CALLBACK_HOST": "localhost"
+  }
+}
