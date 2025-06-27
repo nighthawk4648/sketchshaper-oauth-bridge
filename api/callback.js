@@ -1,4 +1,4 @@
-// api/callback.js - Complete OAuth handler for SketchShaper Pro
+// api/callback.js - Enhanced OAuth handler with debug logging
 export default async function handler(req, res) {
   const { method, query, headers } = req;
   
@@ -39,6 +39,19 @@ export default async function handler(req, res) {
 async function handleOAuthCallback(req, res) {
   const { code, error, state, error_description } = req.query;
   
+  // Enhanced logging with more details
+  console.log('=== OAuth Callback Debug Info ===');
+  console.log('Full query params:', req.query);
+  console.log('Code present:', !!code);
+  console.log('Code length:', code ? code.length : 0);
+  console.log('State present:', !!state);
+  console.log('Environment check:', {
+    CLIENT_ID_set: !!process.env.PATREON_CLIENT_ID,
+    CLIENT_SECRET_set: !!process.env.PATREON_CLIENT_SECRET,
+    REDIRECT_URI_set: !!process.env.PATREON_REDIRECT_URI,
+    REDIRECT_URI_value: process.env.PATREON_REDIRECT_URI
+  });
+  
   // Log callback details
   console.log('OAuth callback received:', {
     code: code ? `${code.substring(0, 8)}...` : null,
@@ -56,7 +69,8 @@ async function handleOAuthCallback(req, res) {
     return res.status(200).send(createCallbackPage({
       status: 'error',
       error: error_description || error,
-      state
+      state,
+      debug: { step: 'oauth_error', details: { error, error_description } }
     }));
   }
   
@@ -66,7 +80,8 @@ async function handleOAuthCallback(req, res) {
     return res.status(200).send(createCallbackPage({
       status: 'error',
       error: 'No authorization code received from Patreon',
-      state
+      state,
+      debug: { step: 'missing_code', query: req.query }
     }));
   }
   
@@ -76,20 +91,35 @@ async function handleOAuthCallback(req, res) {
     return res.status(200).send(createCallbackPage({
       status: 'error',
       error: 'Missing state parameter - possible security issue',
-      state
+      state,
+      debug: { step: 'missing_state', query: req.query }
     }));
   }
   
   try {
+    console.log('Starting token exchange...');
+    
     // Exchange authorization code for access token
     const tokenData = await exchangeCodeForToken(code);
     
+    console.log('Token exchange result:', {
+      success: !tokenData.error,
+      hasAccessToken: !!tokenData.access_token,
+      hasRefreshToken: !!tokenData.refresh_token,
+      error: tokenData.error
+    });
+    
     if (tokenData.error) {
-      console.error('Token exchange failed:', tokenData.error);
+      console.error('Token exchange failed:', tokenData);
       return res.status(200).send(createCallbackPage({
         status: 'error',
         error: `Token exchange failed: ${tokenData.error}`,
-        state
+        state,
+        debug: { 
+          step: 'token_exchange_failed', 
+          details: tokenData,
+          patreonResponse: tokenData.patreonResponse 
+        }
       }));
     }
     
@@ -107,12 +137,140 @@ async function handleOAuthCallback(req, res) {
     }));
     
   } catch (error) {
-    console.error('Token exchange error:', error);
+    console.error('Token exchange error (caught):', {
+      message: error.message,
+      stack: error.stack,
+      name: error.name
+    });
+    
     return res.status(200).send(createCallbackPage({
       status: 'error',
-      error: 'Failed to exchange authorization code for token',
-      state
+      error: `Failed to exchange authorization code: ${error.message}`,
+      state,
+      debug: { 
+        step: 'token_exchange_exception', 
+        error: {
+          message: error.message,
+          name: error.name
+        }
+      }
     }));
+  }
+}
+
+async function exchangeCodeForToken(code) {
+  const CLIENT_ID = process.env.PATREON_CLIENT_ID;
+  const CLIENT_SECRET = process.env.PATREON_CLIENT_SECRET;
+  const REDIRECT_URI = process.env.PATREON_REDIRECT_URI || 'https://api2.sketchshaper.com/callback';
+  
+  console.log('Token exchange attempt:', {
+    CLIENT_ID: CLIENT_ID ? `${CLIENT_ID.substring(0, 8)}...` : 'MISSING',
+    CLIENT_SECRET: CLIENT_SECRET ? 'SET' : 'MISSING',
+    REDIRECT_URI,
+    code_length: code ? code.length : 0
+  });
+  
+  if (!CLIENT_ID || !CLIENT_SECRET) {
+    const error = `Missing Patreon OAuth credentials: CLIENT_ID=${!!CLIENT_ID}, CLIENT_SECRET=${!!CLIENT_SECRET}`;
+    console.error(error);
+    throw new Error(error);
+  }
+  
+  const requestBody = new URLSearchParams({
+    code,
+    grant_type: 'authorization_code',
+    client_id: CLIENT_ID,
+    client_secret: CLIENT_SECRET,
+    redirect_uri: REDIRECT_URI
+  });
+  
+  console.log('Request to Patreon token endpoint:', {
+    url: 'https://www.patreon.com/api/oauth2/token',
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': 'SketchShaper Pro/1.0'
+    },
+    body: requestBody.toString().replace(CLIENT_SECRET, '[REDACTED]')
+  });
+  
+  try {
+    const tokenResponse = await fetch('https://www.patreon.com/api/oauth2/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'SketchShaper Pro/1.0'
+      },
+      body: requestBody
+    });
+    
+    console.log('Patreon response status:', tokenResponse.status, tokenResponse.statusText);
+    console.log('Patreon response headers:', Object.fromEntries(tokenResponse.headers.entries()));
+    
+    let tokenData;
+    const responseText = await tokenResponse.text();
+    
+    console.log('Raw Patreon response:', responseText);
+    
+    try {
+      tokenData = JSON.parse(responseText);
+    } catch (parseError) {
+      console.error('Failed to parse Patreon response as JSON:', parseError);
+      return { 
+        error: 'Invalid JSON response from Patreon',
+        patreonResponse: responseText.substring(0, 500)
+      };
+    }
+    
+    if (!tokenResponse.ok) {
+      console.error('Patreon token exchange failed:', {
+        status: tokenResponse.status,
+        statusText: tokenResponse.statusText,
+        data: tokenData
+      });
+      
+      return { 
+        error: tokenData.error_description || tokenData.error || `HTTP ${tokenResponse.status}: ${tokenResponse.statusText}`,
+        patreonResponse: tokenData
+      };
+    }
+    
+    console.log('Token exchange successful, token data keys:', Object.keys(tokenData));
+    
+    // Optionally fetch user data
+    if (tokenData.access_token) {
+      try {
+        console.log('Fetching user data...');
+        const userResponse = await fetch('https://www.patreon.com/api/oauth2/v2/identity?include=memberships&fields%5Buser%5D=email,first_name,full_name,image_url,last_name,social_connections,thumb_url,url,vanity', {
+          headers: {
+            'Authorization': `Bearer ${tokenData.access_token}`,
+            'User-Agent': 'SketchShaper Pro/1.0'
+          }
+        });
+        
+        console.log('User data response status:', userResponse.status);
+        
+        if (userResponse.ok) {
+          const userData = await userResponse.json();
+          console.log('User data fetched successfully');
+          tokenData.user_data = userData;
+        } else {
+          console.warn('Failed to fetch user data:', userResponse.status, userResponse.statusText);
+        }
+      } catch (userError) {
+        console.warn('Failed to fetch user data:', userError.message);
+      }
+    }
+    
+    return tokenData;
+    
+  } catch (error) {
+    console.error('Token exchange request failed:', {
+      message: error.message,
+      stack: error.stack,
+      name: error.name
+    });
+    return { error: `Network error during token exchange: ${error.message}` };
   }
 }
 
@@ -144,65 +302,7 @@ async function handleTokenExchange(req, res) {
   }
 }
 
-async function exchangeCodeForToken(code) {
-  const CLIENT_ID = process.env.PATREON_CLIENT_ID;
-  const CLIENT_SECRET = process.env.PATREON_CLIENT_SECRET;
-  const REDIRECT_URI = process.env.PATREON_REDIRECT_URI || 'https://api2.sketchshaper.com/callback';
-  
-  if (!CLIENT_ID || !CLIENT_SECRET) {
-    throw new Error('Missing Patreon OAuth credentials');
-  }
-  
-  try {
-    const tokenResponse = await fetch('https://www.patreon.com/api/oauth2/token', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'SketchShaper Pro/1.0'
-      },
-      body: new URLSearchParams({
-        code,
-        grant_type: 'authorization_code',
-        client_id: CLIENT_ID,
-        client_secret: CLIENT_SECRET,
-        redirect_uri: REDIRECT_URI
-      })
-    });
-    
-    const tokenData = await tokenResponse.json();
-    
-    if (!tokenResponse.ok) {
-      console.error('Patreon token exchange failed:', tokenData);
-      return { error: tokenData.error_description || tokenData.error || 'Token exchange failed' };
-    }
-    
-    // Optionally fetch user data
-    if (tokenData.access_token) {
-      try {
-        const userResponse = await fetch('https://www.patreon.com/api/oauth2/v2/identity?include=memberships&fields%5Buser%5D=email,first_name,full_name,image_url,last_name,social_connections,thumb_url,url,vanity', {
-          headers: {
-            'Authorization': `Bearer ${tokenData.access_token}`,
-            'User-Agent': 'SketchShaper Pro/1.0'
-          }
-        });
-        
-        if (userResponse.ok) {
-          tokenData.user_data = await userResponse.json();
-        }
-      } catch (userError) {
-        console.warn('Failed to fetch user data:', userError.message);
-      }
-    }
-    
-    return tokenData;
-    
-  } catch (error) {
-    console.error('Token exchange request failed:', error);
-    return { error: 'Network error during token exchange' };
-  }
-}
-
-function createCallbackPage({ status, error, accessToken, refreshToken, expiresIn, state, userData }) {
+function createCallbackPage({ status, error, accessToken, refreshToken, expiresIn, state, userData, debug }) {
   const isSuccess = status === 'success';
   
   return `
@@ -233,7 +333,7 @@ function createCallbackPage({ status, error, accessToken, refreshToken, expiresI
             border-radius: 16px;
             box-shadow: 0 20px 40px rgba(0,0,0,0.1);
             padding: 40px;
-            max-width: 500px;
+            max-width: 600px;
             width: 90%;
             text-align: center;
         }
@@ -266,6 +366,30 @@ function createCallbackPage({ status, error, accessToken, refreshToken, expiresI
             padding: 20px;
             margin: 20px 0;
             text-align: left;
+        }
+        
+        .debug-info {
+            background: #FEF3C7;
+            border: 1px solid #F59E0B;
+            border-radius: 12px;
+            padding: 20px;
+            margin: 20px 0;
+            text-align: left;
+        }
+        
+        .debug-title {
+            font-weight: bold;
+            color: #92400E;
+            margin-bottom: 10px;
+        }
+        
+        .debug-content {
+            font-family: monospace;
+            font-size: 12px;
+            color: #451A03;
+            white-space: pre-wrap;
+            max-height: 200px;
+            overflow-y: auto;
         }
         
         .info-row {
@@ -303,6 +427,8 @@ function createCallbackPage({ status, error, accessToken, refreshToken, expiresI
             font-weight: 500;
             margin: 0 8px;
             transition: all 0.2s;
+            cursor: pointer;
+            border: none;
         }
         
         .btn-primary {
@@ -357,6 +483,13 @@ function createCallbackPage({ status, error, accessToken, refreshToken, expiresI
                 : `Authentication failed: ${error}`
             }
         </div>
+        
+        ${debug ? `
+        <div class="debug-info">
+            <div class="debug-title">Debug Information</div>
+            <div class="debug-content">${JSON.stringify(debug, null, 2)}</div>
+        </div>
+        ` : ''}
         
         ${isSuccess ? `
         <div class="status-info">
