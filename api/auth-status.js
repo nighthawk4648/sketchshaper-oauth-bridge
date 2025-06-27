@@ -45,10 +45,11 @@ export default async function handler(req, res) {
     }
 
     // Return the session data
-    const response = {
-      status: session.status,
-      timestamp: session.timestamp
-    };
+    // On your Vercel server after successful auth:
+const response = await fetch('http://localhost:SOME_PORT/auth-complete', {
+  method: 'POST',
+  body: JSON.stringify({ access_token, refresh_token, expires_in })
+});
 
     if (session.status === 'completed') {
       response.code = session.code;
