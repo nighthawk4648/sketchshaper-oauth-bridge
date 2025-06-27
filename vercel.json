@@ -6,14 +6,14 @@
       "runtime": "@vercel/node@3.0.0"
     }
   },
-  "routes": [
+  "rewrites": [
     {
-      "src": "/callback",
-      "dest": "/api/callback"
+      "source": "/callback",
+      "destination": "/api/callback"
     },
     {
-      "src": "/health",
-      "dest": "/api/health"
+      "source": "/health",
+      "destination": "/api/health"
     }
   ],
   "headers": [
