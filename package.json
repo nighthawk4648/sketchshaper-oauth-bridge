@@ -4,9 +4,7 @@
   "description": "OAuth callback bridge for SketchShaper Pro",
   "main": "api/callback.js",
   "scripts": {
-    "dev": "vercel dev",
-    "build": "echo 'No build necessary'",
-    "deploy": "vercel --prod"
+    "build": "echo \"Skipping build step — not needed\""
   },
   "dependencies": {},
   "devDependencies": {
