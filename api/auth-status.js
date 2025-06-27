@@ -1,6 +1,6 @@
 // api/auth-status.js - Endpoint for SketchUp extension to poll authentication status
-// Access the shared global auth sessions (ensure it exists)
-if (!global.authSessions) {
+// Initialize global auth sessions if not exists
+if (typeof global.authSessions === 'undefined') {
   global.authSessions = new Map();
 }
 
