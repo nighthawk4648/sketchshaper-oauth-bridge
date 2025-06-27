@@ -1,37 +1,52 @@
 {
   "version": 2,
-  "name": "sketchshaper-oauth-bridge",
-  "rewrites": [
+  "name": "sketchshaper-oauth",
+  "builds": [
     {
-      "source": "/callback",
-      "destination": "/api/callback"
-    },
-    {
-      "source": "/health",
-      "destination": "/api/health"
+      "src": "api/**/*.js",
+      "use": "@vercel/node"
     }
   ],
+  "routes": [
+    {
+      "src": "/callback",
+      "dest": "/api/callback.js"
+    },
+    {
+      "src": "/api/callback",
+      "dest": "/api/callback.js"
+    },
+    {
+      "src": "/tokens",
+      "dest": "/api/tokens.js"
+    },
+    {
+      "src": "/api/tokens",
+      "dest": "/api/tokens.js"
+    }
+  ],
+  "env": {
+    "PATREON_CLIENT_ID": "@patreon-client-id",
+    "PATREON_CLIENT_SECRET": "@patreon-client-secret",
+    "PATREON_REDIRECT_URI": "https://api2.sketchshaper.com/callback"
+  },
   "headers": [
     {
       "source": "/api/(.*)",
       "headers": [
         {
-          "key": "Access-Control-Allow-Origin",
-          "value": "*"
+          "key": "Cache-Control",
+          "value": "no-cache, no-store, must-revalidate"
         },
         {
-          "key": "Access-Control-Allow-Methods",
-          "value": "GET, OPTIONS"
+          "key": "Pragma",
+          "value": "no-cache"
         },
         {
-          "key": "Access-Control-Allow-Headers",
-          "value": "Content-Type"
+          "key": "Expires",
+          "value": "0"
         }
       ]
     }
-  ],
-  "env": {
-    "LOCAL_CALLBACK_PORT": "9090",
-    "LOCAL_CALLBACK_HOST": "localhost"
-  }
+  ]
 }
