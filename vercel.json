@@ -1,11 +1,6 @@
 {
   "version": 2,
   "name": "sketchshaper-oauth-bridge",
-  "functions": {
-    "api/callback.js": {
-      "runtime": "@vercel/node@3.0.0"
-    }
-  },
   "rewrites": [
     {
       "source": "/callback",
