@@ -1,32 +1,15 @@
 {
   "version": 2,
-  "rewrites": [
+  "builds": [
     {
-      "source": "/callback",
-      "destination": "/api/callback"
-    },
-    {
-      "source": "/auth-status",
-      "destination": "/api/auth-status"
+      "src": "api/**/*.js",
+      "use": "@vercel/node"
     }
   ],
-  "headers": [
+  "routes": [
     {
-      "source": "/api/(.*)",
-      "headers": [
-        {
-          "key": "Access-Control-Allow-Origin",
-          "value": "*"
-        },
-        {
-          "key": "Access-Control-Allow-Methods",
-          "value": "GET, POST, OPTIONS"
-        },
-        {
-          "key": "Access-Control-Allow-Headers",
-          "value": "Content-Type, User-Agent"
-        }
-      ]
+      "src": "/api/(.*)",
+      "dest": "/api/$1"
     }
   ]
 }
