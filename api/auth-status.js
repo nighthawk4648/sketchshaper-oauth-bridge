@@ -1,100 +1,73 @@
-import fetch from 'node-fetch';
+// api/auth-status.js - Endpoint for SketchUp extension to poll authentication status
 
-// Initialize sessions if not exists
-global.authSessions = global.authSessions || new Map();
+export default function handler(req, res) {
+  // Enable CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, User-Agent');
 
-export default async function handler(req, res) {
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  if (req.method !== 'GET') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
   try {
-    // Set CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-    if (req.method === 'OPTIONS') {
-      return res.status(200).end();
-    }
-
-    if (req.method !== 'GET') {
-      return res.status(405).json({ error: 'Method not allowed' });
-    }
-
     const { state } = req.query;
 
     if (!state) {
-      return res.status(400).json({ 
-        status: 'error',
-        error: 'State parameter required' 
-      });
+      return res.status(400).json({ error: 'State parameter required' });
     }
 
-    const session = global.authSessions.get(state);
-    
+    // In a real implementation, you'd access shared storage here
+    // For now, we'll use a global Map (not ideal for serverless)
+    const session = global.authSessions?.get(state);
+
     if (!session) {
-      return res.status(200).json({ 
+      return res.status(404).json({ 
         status: 'pending',
-        message: 'Authentication session not found'
+        message: 'Authentication session not found or still pending' 
       });
     }
 
-    // Session expiration (10 minutes)
-    const tenMinutesAgo = Date.now() - 600000;
-    if (session.timestamp < tenMinutesAgo) {
-      global.authSessions.delete(state);
-      return res.status(200).json({ 
+    // Clean up old sessions (older than 5 minutes)
+    const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
+    if (session.timestamp < fiveMinutesAgo) {
+      global.authSessions?.delete(state);
+      return res.status(404).json({ 
         status: 'expired',
-        message: 'Session expired' 
+        message: 'Authentication session expired' 
       });
     }
 
-    if (session.status === 'completed' && session.code && !session.access_token) {
-      // Token exchange
-      const tokenParams = new URLSearchParams();
-      tokenParams.append('code', session.code);
-      tokenParams.append('grant_type', 'authorization_code');
-      tokenParams.append('client_id', process.env.PATREON_CLIENT_ID);
-      tokenParams.append('client_secret', process.env.PATREON_CLIENT_SECRET);
-      tokenParams.append('redirect_uri', process.env.PATREON_REDIRECT_URI);
+    // Return the session data
+    const response = {
+      status: session.status,
+      timestamp: session.timestamp
+    };
 
-      const tokenResponse = await fetch('https://www.patreon.com/api/oauth2/token', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded'
-        },
-        body: tokenParams
-      });
-
-      if (!tokenResponse.ok) {
-        throw new Error(`Token exchange failed: ${tokenResponse.status}`);
-      }
-
-      const tokenData = await tokenResponse.json();
-      session.access_token = tokenData.access_token;
-      session.refresh_token = tokenData.refresh_token;
-      session.expires_in = tokenData.expires_in;
+    if (session.status === 'completed') {
+      response.code = session.code;
+      response.state = state;
+      // Clean up the session after successful retrieval
+      global.authSessions?.delete(state);
+    } else if (session.status === 'error') {
+      response.error = session.error;
+      // Clean up error sessions too
+      global.authSessions?.delete(state);
     }
 
-    if (session.access_token) {
-      const response = {
-        status: 'completed',
-        access_token: session.access_token,
-        refresh_token: session.refresh_token,
-        expires_in: session.expires_in
-      };
-      global.authSessions.delete(state);
-      return res.status(200).json(response);
-    }
+    console.log('Auth status checked for state:', state, 'Status:', session.status);
 
-    return res.status(200).json({
-      status: session.status || 'pending',
-      ...(session.error && { error: session.error })
-    });
+    return res.status(200).json(response);
 
   } catch (error) {
-    console.error('Auth status error:', error);
+    console.error('Auth status check error:', error);
     return res.status(500).json({ 
       status: 'error',
-      error: 'Internal server error',
-      details: error.message 
+      error: 'Internal server error' 
     });
   }
 }
