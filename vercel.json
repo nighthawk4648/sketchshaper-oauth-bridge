@@ -1,52 +1,8 @@
 {
   "version": 2,
-  "name": "sketchshaper-oauth",
-  "builds": [
-    {
-      "src": "api/**/*.js",
-      "use": "@vercel/node"
+  "functions": {
+    "api/**/*.js": {
+      "runtime": "nodejs18.x"
     }
-  ],
-  "routes": [
-    {
-      "src": "/callback",
-      "dest": "/api/callback.js"
-    },
-    {
-      "src": "/api/callback",
-      "dest": "/api/callback.js"
-    },
-    {
-      "src": "/tokens",
-      "dest": "/api/tokens.js"
-    },
-    {
-      "src": "/api/tokens",
-      "dest": "/api/tokens.js"
-    }
-  ],
-  "env": {
-    "PATREON_CLIENT_ID": "@patreon-client-id",
-    "PATREON_CLIENT_SECRET": "@patreon-client-secret",
-    "PATREON_REDIRECT_URI": "https://api2.sketchshaper.com/callback"
-  },
-  "headers": [
-    {
-      "source": "/api/(.*)",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "no-cache, no-store, must-revalidate"
-        },
-        {
-          "key": "Pragma",
-          "value": "no-cache"
-        },
-        {
-          "key": "Expires",
-          "value": "0"
-        }
-      ]
-    }
-  ]
+  }
 }
