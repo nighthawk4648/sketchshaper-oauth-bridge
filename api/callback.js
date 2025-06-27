@@ -1,5 +1,8 @@
 // api/callback.js - Handles Patreon OAuth callback
-const authSessions = new Map(); // In production, use Redis or a database
+// Using global object to share state between functions (not ideal for production)
+if (!global.authSessions) {
+  global.authSessions = new Map();
+}
 
 export default async function handler(req, res) {
   // Enable CORS for your domain
@@ -10,91 +13,6 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
-
-// api/auth-status.js - Endpoint for SketchUp extension to poll
-export async function authStatusHandler(req, res) {
-  // Enable CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, User-Agent');
-
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  if (req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
-  try {
-    const { state } = req.query;
-
-    if (!state) {
-      return res.status(400).json({ error: 'State parameter required' });
-    }
-
-    const session = authSessions.get(state);
-
-    if (!session) {
-      return res.status(404).json({ 
-        status: 'pending',
-        message: 'Authentication session not found or still pending' 
-      });
-    }
-
-    // Clean up old sessions (older than 5 minutes)
-    const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
-    if (session.timestamp < fiveMinutesAgo) {
-      authSessions.delete(state);
-      return res.status(404).json({ 
-        status: 'expired',
-        message: 'Authentication session expired' 
-      });
-    }
-
-    // Return the session data
-    const response = {
-      status: session.status,
-      timestamp: session.timestamp
-    };
-
-    if (session.status === 'completed') {
-      response.code = session.code;
-      response.state = state;
-      // Clean up the session after successful retrieval
-      authSessions.delete(state);
-    } else if (session.status === 'error') {
-      response.error = session.error;
-      // Clean up error sessions too
-      authSessions.delete(state);
-    }
-
-    console.log('Auth status checked for state:', state, 'Status:', session.status);
-
-    return res.status(200).json(response);
-
-  } catch (error) {
-    console.error('Auth status check error:', error);
-    return res.status(500).json({ 
-      status: 'error',
-      error: 'Internal server error' 
-    });
-  }
-}
-
-// Cleanup function to remove old sessions (call this periodically)
-function cleanupOldSessions() {
-  const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
-  for (const [state, session] of authSessions.entries()) {
-    if (session.timestamp < tenMinutesAgo) {
-      authSessions.delete(state);
-      console.log('Cleaned up old session:', state);
-    }
-  }
-}
-
-// Run cleanup every 5 minutes
-setInterval(cleanupOldSessions, 5 * 60 * 1000);
 
   if (req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -111,7 +29,7 @@ setInterval(cleanupOldSessions, 5 * 60 * 1000);
       
       // Store error in session
       if (state) {
-        authSessions.set(state, {
+        global.authSessions.set(state, {
           status: 'error',
           error: error_description || error,
           timestamp: Date.now()
@@ -160,7 +78,7 @@ setInterval(cleanupOldSessions, 5 * 60 * 1000);
     }
 
     // Store the authorization code for the SketchUp extension to retrieve
-    authSessions.set(state, {
+    global.authSessions.set(state, {
       status: 'completed',
       code: code,
       timestamp: Date.now()
