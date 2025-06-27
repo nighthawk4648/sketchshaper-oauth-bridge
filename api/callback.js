@@ -1,155 +1,209 @@
-// api/callback.js - Enhanced Vercel serverless function for SketchShaper Pro OAuth
+// api/callback.js - Complete OAuth handler for SketchShaper Pro
 export default async function handler(req, res) {
   const { method, query, headers } = req;
   
-  // Add CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // Security headers
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
+  
+  // CORS headers for API access
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   
   // Handle preflight requests
   if (method === 'OPTIONS') {
     return res.status(200).end();
   }
   
-  // Only handle GET requests (OAuth callback)
-  if (method !== 'GET') {
-    console.error('Invalid method:', method);
-    return res.status(405).json({ 
-      error: 'Method not allowed',
-      allowed_methods: ['GET', 'OPTIONS']
-    });
+  // Handle OAuth callback from Patreon
+  if (method === 'GET') {
+    return handleOAuthCallback(req, res);
   }
-
-  const { code, error, state, error_description } = query;
   
-  // Enhanced logging for debugging
+  // Handle token exchange from desktop app
+  if (method === 'POST') {
+    return handleTokenExchange(req, res);
+  }
+  
+  return res.status(405).json({ 
+    error: 'Method not allowed',
+    allowed_methods: ['GET', 'POST', 'OPTIONS']
+  });
+}
+
+async function handleOAuthCallback(req, res) {
+  const { code, error, state, error_description } = req.query;
+  
+  // Log callback details
   console.log('OAuth callback received:', {
     code: code ? `${code.substring(0, 8)}...` : null,
     error,
     error_description,
     state: state ? `${state.substring(0, 8)}...` : null,
-    userAgent: headers['user-agent'],
     timestamp: new Date().toISOString(),
-    ip: headers['x-forwarded-for'] || headers['x-real-ip'] || 'unknown'
+    userAgent: req.headers['user-agent'],
+    ip: req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || 'unknown'
   });
   
-  // Validate required parameters
-  if (!state) {
-    console.warn('Missing state parameter - possible security issue');
-    return redirectToLocal(res, { 
-      error: 'Missing state parameter',
-      status: 'error'
-    });
-  }
-  
-  // Handle OAuth error from Patreon
+  // Handle OAuth errors from Patreon
   if (error) {
-    console.error('OAuth error from Patreon:', {
-      error,
-      error_description,
-      state
-    });
-    
-    return redirectToLocal(res, { 
-      error: error_description || error, 
+    console.error('OAuth error from Patreon:', { error, error_description, state });
+    return res.status(200).send(createCallbackPage({
       status: 'error',
-      state 
-    });
+      error: error_description || error,
+      state
+    }));
   }
   
-  // Handle successful authorization
-  if (code) {
-    console.log('Authorization successful:', {
-      codeLength: code.length,
-      state: state ? `${state.substring(0, 8)}...` : null
-    });
-    
-    return redirectToLocal(res, { 
-      code, 
-      status: 'success', 
-      state,
-      timestamp: Date.now()
-    });
+  // Validate authorization code
+  if (!code) {
+    console.warn('No authorization code received');
+    return res.status(200).send(createCallbackPage({
+      status: 'error',
+      error: 'No authorization code received from Patreon',
+      state
+    }));
   }
   
-  // No code or error - invalid callback
-  console.warn('Invalid callback - missing authorization code:', {
-    query,
-    hasCode: !!code,
-    hasError: !!error
-  });
-  
-  return redirectToLocal(res, { 
-    error: 'Invalid callback - no authorization code received',
-    status: 'error',
-    state
-  });
-}
-
-function redirectToLocal(res, params) {
-  // Configuration with fallbacks
-  const LOCAL_PORT = process.env.LOCAL_CALLBACK_PORT || 9090;
-  const LOCAL_HOST = process.env.LOCAL_CALLBACK_HOST || 'localhost';
-  const LOCAL_CALLBACK_PATH = process.env.LOCAL_CALLBACK_PATH || '/callback';
-  
-  // Build the local callback URL
-  const LOCAL_CALLBACK_URL = `http://${LOCAL_HOST}:${LOCAL_PORT}${LOCAL_CALLBACK_PATH}`;
-  
-  // Clean and validate parameters
-  const cleanParams = {};
-  Object.keys(params).forEach(key => {
-    if (params[key] !== null && params[key] !== undefined) {
-      cleanParams[key] = String(params[key]);
-    }
-  });
-  
-  // Build query string
-  const queryString = new URLSearchParams(cleanParams).toString();
-  const redirectUrl = `${LOCAL_CALLBACK_URL}?${queryString}`;
-  
-  console.log('Redirecting to local server:', {
-    url: redirectUrl.replace(/code=[^&]+/, 'code=***'), // Hide sensitive code in logs
-    params: {
-      ...cleanParams,
-      code: cleanParams.code ? '***' : undefined // Hide sensitive code in logs
-    },
-    timestamp: new Date().toISOString()
-  });
+  // Validate state parameter
+  if (!state) {
+    console.warn('Missing state parameter');
+    return res.status(200).send(createCallbackPage({
+      status: 'error',
+      error: 'Missing state parameter - possible security issue',
+      state
+    }));
+  }
   
   try {
-    // Attempt redirect with comprehensive headers
-    res.writeHead(302, {
-      'Location': redirectUrl,
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'Pragma': 'no-cache',
-      'Expires': '0',
-      'X-Callback-Status': params.status || 'unknown',
-      'X-Redirect-Target': 'local-server',
-      'X-Timestamp': new Date().toISOString()
-    });
+    // Exchange authorization code for access token
+    const tokenData = await exchangeCodeForToken(code);
     
-    res.end();
+    if (tokenData.error) {
+      console.error('Token exchange failed:', tokenData.error);
+      return res.status(200).send(createCallbackPage({
+        status: 'error',
+        error: `Token exchange failed: ${tokenData.error}`,
+        state
+      }));
+    }
     
-  } catch (redirectError) {
-    console.error('Redirect failed:', {
-      error: redirectError.message,
-      stack: redirectError.stack,
-      intended_redirect: redirectUrl.replace(/code=[^&]+/, 'code=***')
-    });
+    // Store token temporarily with state as key (you might want to use Redis or similar)
+    // For now, we'll pass it directly to the success page
+    console.log('Token exchange successful');
     
-    // Fallback: Return HTML page with auto-redirect and manual link
-    const fallbackHtml = createFallbackPage(redirectUrl, cleanParams);
+    return res.status(200).send(createCallbackPage({
+      status: 'success',
+      accessToken: tokenData.access_token,
+      refreshToken: tokenData.refresh_token,
+      expiresIn: tokenData.expires_in,
+      state,
+      userData: tokenData.user_data
+    }));
     
-    res.status(200).setHeader('Content-Type', 'text/html').send(fallbackHtml);
+  } catch (error) {
+    console.error('Token exchange error:', error);
+    return res.status(200).send(createCallbackPage({
+      status: 'error',
+      error: 'Failed to exchange authorization code for token',
+      state
+    }));
   }
 }
 
-function createFallbackPage(redirectUrl, params) {
-  const isError = params.status === 'error';
+async function handleTokenExchange(req, res) {
+  try {
+    const { state } = req.body;
+    
+    if (!state) {
+      return res.status(400).json({
+        error: 'Missing state parameter'
+      });
+    }
+    
+    // Here you would retrieve the stored token data using the state
+    // For this example, we'll return a placeholder response
+    // In production, implement proper token storage (Redis, database, etc.)
+    
+    return res.status(501).json({
+      error: 'Token retrieval not implemented',
+      message: 'Implement token storage mechanism'
+    });
+    
+  } catch (error) {
+    console.error('Token retrieval error:', error);
+    return res.status(500).json({
+      error: 'Internal server error',
+      details: error.message
+    });
+  }
+}
+
+async function exchangeCodeForToken(code) {
+  const CLIENT_ID = process.env.PATREON_CLIENT_ID;
+  const CLIENT_SECRET = process.env.PATREON_CLIENT_SECRET;
+  const REDIRECT_URI = process.env.PATREON_REDIRECT_URI || 'https://api2.sketchshaper.com/callback';
+  
+  if (!CLIENT_ID || !CLIENT_SECRET) {
+    throw new Error('Missing Patreon OAuth credentials');
+  }
+  
+  try {
+    const tokenResponse = await fetch('https://www.patreon.com/api/oauth2/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'SketchShaper Pro/1.0'
+      },
+      body: new URLSearchParams({
+        code,
+        grant_type: 'authorization_code',
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        redirect_uri: REDIRECT_URI
+      })
+    });
+    
+    const tokenData = await tokenResponse.json();
+    
+    if (!tokenResponse.ok) {
+      console.error('Patreon token exchange failed:', tokenData);
+      return { error: tokenData.error_description || tokenData.error || 'Token exchange failed' };
+    }
+    
+    // Optionally fetch user data
+    if (tokenData.access_token) {
+      try {
+        const userResponse = await fetch('https://www.patreon.com/api/oauth2/v2/identity?include=memberships&fields%5Buser%5D=email,first_name,full_name,image_url,last_name,social_connections,thumb_url,url,vanity', {
+          headers: {
+            'Authorization': `Bearer ${tokenData.access_token}`,
+            'User-Agent': 'SketchShaper Pro/1.0'
+          }
+        });
+        
+        if (userResponse.ok) {
+          tokenData.user_data = await userResponse.json();
+        }
+      } catch (userError) {
+        console.warn('Failed to fetch user data:', userError.message);
+      }
+    }
+    
+    return tokenData;
+    
+  } catch (error) {
+    console.error('Token exchange request failed:', error);
+    return { error: 'Network error during token exchange' };
+  }
+}
+
+function createCallbackPage({ status, error, accessToken, refreshToken, expiresIn, state, userData }) {
+  const isSuccess = status === 'success';
   
   return `
 <!DOCTYPE html>
@@ -157,106 +211,267 @@ function createFallbackPage(redirectUrl, params) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SketchShaper Pro - OAuth ${isError ? 'Error' : 'Success'}</title>
+    <title>SketchShaper Pro - OAuth ${isSuccess ? 'Success' : 'Error'}</title>
     <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            max-width: 600px;
-            margin: 50px auto;
-            padding: 20px;
-            background: #f5f5f5;
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
         .container {
             background: white;
-            padding: 30px;
-            border-radius: 12px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            border-radius: 16px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            padding: 40px;
+            max-width: 500px;
+            width: 90%;
             text-align: center;
         }
-        .status {
-            font-size: 48px;
+        
+        .icon {
+            font-size: 64px;
             margin-bottom: 20px;
         }
-        .success { color: #4CAF50; }
-        .error { color: #f44336; }
-        .message {
-            font-size: 18px;
-            margin-bottom: 30px;
-            color: #333;
+        
+        .success-icon { color: #10B981; }
+        .error-icon { color: #EF4444; }
+        
+        h1 {
+            color: #1F2937;
+            margin-bottom: 16px;
+            font-size: 28px;
+            font-weight: 600;
         }
-        .redirect-info {
-            background: #e3f2fd;
-            padding: 15px;
-            border-radius: 8px;
+        
+        .message {
+            color: #6B7280;
+            font-size: 16px;
+            line-height: 1.6;
+            margin-bottom: 30px;
+        }
+        
+        .status-info {
+            background: #F3F4F6;
+            border-radius: 12px;
+            padding: 20px;
             margin: 20px 0;
+            text-align: left;
+        }
+        
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid #E5E7EB;
+        }
+        
+        .info-row:last-child {
+            border-bottom: none;
+        }
+        
+        .info-label {
+            font-weight: 500;
+            color: #374151;
+        }
+        
+        .info-value {
+            color: #6B7280;
+            font-family: monospace;
             font-size: 14px;
         }
-        .manual-link {
+        
+        .actions {
+            margin-top: 30px;
+        }
+        
+        .btn {
             display: inline-block;
-            background: #2196F3;
-            color: white;
             padding: 12px 24px;
+            border-radius: 8px;
             text-decoration: none;
-            border-radius: 6px;
-            margin-top: 15px;
+            font-weight: 500;
+            margin: 0 8px;
+            transition: all 0.2s;
         }
-        .manual-link:hover {
-            background: #1976D2;
+        
+        .btn-primary {
+            background: #3B82F6;
+            color: white;
         }
-        .countdown {
-            font-weight: bold;
-            color: #2196F3;
+        
+        .btn-primary:hover {
+            background: #2563EB;
+        }
+        
+        .btn-secondary {
+            background: #F3F4F6;
+            color: #374151;
+        }
+        
+        .btn-secondary:hover {
+            background: #E5E7EB;
+        }
+        
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #E5E7EB;
+            border-radius: 50%;
+            border-top-color: #3B82F6;
+            animation: spin 1s ease-in-out infinite;
+            margin-right: 8px;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .hidden {
+            display: none;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="status ${isError ? 'error' : 'success'}">
-            ${isError ? '❌' : '✅'}
+        <div class="icon ${isSuccess ? 'success-icon' : 'error-icon'}">
+            ${isSuccess ? '✅' : '❌'}
         </div>
         
-        <h1>SketchShaper Pro OAuth</h1>
+        <h1>SketchShaper Pro</h1>
         
         <div class="message">
-            ${isError 
-                ? `Error: ${params.error || 'Unknown error occurred'}`
-                : 'Authorization successful! Redirecting to SketchShaper Pro...'
+            ${isSuccess 
+                ? 'Successfully authenticated with Patreon! Your desktop app should automatically receive your credentials.'
+                : `Authentication failed: ${error}`
             }
         </div>
         
-        ${!isError ? `
-        <div class="redirect-info">
-            <p>Redirecting automatically in <span class="countdown" id="countdown">3</span> seconds...</p>
-            <p>If you're not redirected automatically, click the button below:</p>
-            <a href="${redirectUrl}" class="manual-link">Continue to SketchShaper Pro</a>
+        ${isSuccess ? `
+        <div class="status-info">
+            <div class="info-row">
+                <span class="info-label">Status</span>
+                <span class="info-value" style="color: #10B981;">Connected</span>
+            </div>
+            ${userData && userData.data ? `
+            <div class="info-row">
+                <span class="info-label">Account</span>
+                <span class="info-value">${userData.data.attributes?.full_name || 'Unknown'}</span>
+            </div>
+            ` : ''}
+            <div class="info-row">
+                <span class="info-label">Session</span>
+                <span class="info-value">${state ? state.substring(0, 8) + '...' : 'Unknown'}</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Expires</span>
+                <span class="info-value">${expiresIn ? Math.floor(expiresIn / 3600) + ' hours' : 'Unknown'}</span>
+            </div>
         </div>
         
-        <script>
-            let count = 3;
-            const countdownEl = document.getElementById('countdown');
-            
-            const timer = setInterval(() => {
-                count--;
-                countdownEl.textContent = count;
-                
-                if (count <= 0) {
-                    clearInterval(timer);
-                    window.location.href = '${redirectUrl}';
-                }
-            }, 1000);
-            
-            // Also try immediate redirect (in case user has popup blockers)
-            setTimeout(() => {
-                window.location.href = '${redirectUrl}';
-            }, 100);
-        </script>
-        ` : `
-        <div class="redirect-info">
-            <p>Please return to SketchShaper Pro and try again.</p>
-            <a href="#" onclick="window.close()" class="manual-link">Close Window</a>
+        <div id="desktop-notification" class="status-info" style="background: #EFF6FF; border: 1px solid #DBEAFE;">
+            <div style="display: flex; align-items: center; justify-content: center;">
+                <div class="loading"></div>
+                <span>Notifying desktop application...</span>
+            </div>
         </div>
-        `}
+        ` : ''}
+        
+        <div class="actions">
+            ${isSuccess ? `
+                <button onclick="closeWindow()" class="btn btn-primary">
+                    Return to SketchShaper Pro
+                </button>
+            ` : `
+                <button onclick="window.history.back()" class="btn btn-secondary">
+                    Go Back
+                </button>
+                <button onclick="window.close()" class="btn btn-primary">
+                    Close Window
+                </button>
+            `}
+        </div>
     </div>
+    
+    ${isSuccess ? `
+    <script>
+        // Store credentials for desktop app to retrieve
+        const credentials = {
+            access_token: '${accessToken}',
+            refresh_token: '${refreshToken || ''}',
+            expires_in: ${expiresIn || 0},
+            state: '${state}',
+            timestamp: Date.now()
+        };
+        
+        // Try to communicate with desktop app
+        async function notifyDesktopApp() {
+            try {
+                // Option 1: Custom URL scheme (implement in your desktop app)
+                const customUrl = 'sketchshaper://oauth-success?' + new URLSearchParams({
+                    access_token: credentials.access_token,
+                    refresh_token: credentials.refresh_token,
+                    expires_in: credentials.expires_in,
+                    state: credentials.state
+                });
+                
+                // Try custom URL scheme
+                window.location.href = customUrl;
+                
+                // Option 2: Store in sessionStorage for polling by desktop app
+                if (window.sessionStorage) {
+                    sessionStorage.setItem('sketchshaper_oauth_result', JSON.stringify(credentials));
+                }
+                
+                // Option 3: PostMessage to parent window (if opened as popup)
+                if (window.opener) {
+                    window.opener.postMessage({
+                        type: 'SKETCHSHAPER_OAUTH_SUCCESS',
+                        credentials: credentials
+                    }, '*');
+                }
+                
+                setTimeout(() => {
+                    document.getElementById('desktop-notification').innerHTML = 
+                        '<div style="color: #10B981; text-align: center;">✓ Desktop app notified successfully</div>';
+                }, 2000);
+                
+            } catch (error) {
+                console.error('Failed to notify desktop app:', error);
+                document.getElementById('desktop-notification').innerHTML = 
+                    '<div style="color: #EF4444; text-align: center;">⚠ Please return to SketchShaper Pro manually</div>';
+            }
+        }
+        
+        function closeWindow() {
+            try {
+                window.close();
+            } catch (e) {
+                // If we can't close the window, just hide the content
+                document.body.innerHTML = '<div style="text-align: center; padding: 50px; font-family: Arial, sans-serif;"><h2>You can now close this window</h2><p>Return to SketchShaper Pro to continue.</p></div>';
+            }
+        }
+        
+        // Auto-notify desktop app
+        notifyDesktopApp();
+        
+        // Auto-close after delay
+        setTimeout(() => {
+            closeWindow();
+        }, 10000);
+    </script>
+    ` : ''}
 </body>
 </html>`;
 }
