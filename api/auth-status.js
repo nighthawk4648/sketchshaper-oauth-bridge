@@ -2,7 +2,7 @@
 import fs from 'fs';
 import path from 'path';
 
-const SESSIONS_DIR = '/tmp/auth_sessions';
+const SESSIONS_DIR = process.env.VERCEL ? '/tmp/auth_sessions' : './tmp/auth_sessions';
 const SESSION_TIMEOUT = 15 * 60 * 1000; // 15 minutes (match callback.js)
 
 // Enhanced state validation matching callback.js
@@ -89,10 +89,41 @@ function checkSessionsDirectory() {
       console.log('Sessions directory does not exist:', SESSIONS_DIR);
       return false;
     }
+    
+    // Test read permissions
+    fs.readdirSync(SESSIONS_DIR);
     return true;
   } catch (error) {
     console.error('Failed to check sessions directory:', error);
     return false;
+  }
+}
+
+// Safe file operations
+function safeReadFile(filePath) {
+  try {
+    return fs.readFileSync(filePath, 'utf8');
+  } catch (error) {
+    console.error('Failed to read file:', filePath, error);
+    return null;
+  }
+}
+
+function safeUnlinkFile(filePath) {
+  try {
+    fs.unlinkSync(filePath);
+    return true;
+  } catch (error) {
+    console.error('Failed to delete file:', filePath, error);
+    return false;
+  }
+}
+
+function safeStatFile(filePath) {
+  try {
+    return fs.statSync(filePath);
+  } catch (error) {
+    return null;
   }
 }
 
@@ -111,25 +142,22 @@ function cleanupExpiredSessions() {
       if (!file.endsWith('.json')) continue;
       
       const filePath = path.join(SESSIONS_DIR, file);
+      const stats = safeStatFile(filePath);
       
-      try {
-        const stats = fs.statSync(filePath);
-        const fileAge = now - stats.mtime.getTime();
-        
-        // Clean up files older than session timeout
-        if (fileAge > SESSION_TIMEOUT) {
-          fs.unlinkSync(filePath);
+      if (!stats) {
+        // File doesn't exist or can't be accessed, try to remove
+        safeUnlinkFile(filePath);
+        cleanedCount++;
+        continue;
+      }
+      
+      const fileAge = now - stats.mtime.getTime();
+      
+      // Clean up files older than session timeout
+      if (fileAge > SESSION_TIMEOUT) {
+        if (safeUnlinkFile(filePath)) {
           cleanedCount++;
           console.log('Cleaned up expired session file:', file);
-        }
-      } catch (fileError) {
-        console.error('Error processing session file:', file, fileError);
-        // Try to remove corrupted files
-        try {
-          fs.unlinkSync(filePath);
-          cleanedCount++;
-        } catch (unlinkError) {
-          console.error('Failed to remove corrupted file:', file, unlinkError);
         }
       }
     }
@@ -143,20 +171,25 @@ function cleanupExpiredSessions() {
 }
 
 export default async function handler(req, res) {
-  console.log('Auth status handler started:', req.method, req.url);
+  console.log('=== Auth Status Handler Started ===');
+  console.log('Method:', req.method);
+  console.log('URL:', req.url);
   console.log('Query parameters:', req.query);
+  console.log('Environment:', process.env.VERCEL ? 'Vercel' : 'Local');
 
   try {
     // Set CORS headers (matching callback.js)
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, User-Agent');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
 
     if (req.method === 'OPTIONS') {
       return res.status(200).end();
     }
 
     if (req.method !== 'GET') {
+      console.error('Invalid method:', req.method);
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
@@ -187,7 +220,8 @@ export default async function handler(req, res) {
             state: state,
             stateLength: state.length,
             statePattern: /^[a-fA-F0-9]+_\d+$/.test(state),
-            alternativePattern: /^[a-zA-Z0-9_-]+$/.test(state)
+            alternativePattern: /^[a-zA-Z0-9_-]+$/.test(state),
+            timestamp: new Date().toISOString()
           }
         });
       }
@@ -198,12 +232,16 @@ export default async function handler(req, res) {
       console.error('Sessions directory not accessible');
       return res.status(500).json({
         status: 'error',
-        error: 'Server configuration error'
+        error: 'Server configuration error - session storage not accessible'
       });
     }
 
-    // Clean up expired sessions periodically
-    cleanupExpiredSessions();
+    // Clean up expired sessions periodically (but don't fail if it errors)
+    try {
+      cleanupExpiredSessions();
+    } catch (cleanupError) {
+      console.error('Cleanup failed but continuing:', cleanupError);
+    }
 
     const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
 
@@ -217,19 +255,27 @@ export default async function handler(req, res) {
     }
 
     // Read and parse session data
-    let sessionData;
-    try {
-      const fileContent = fs.readFileSync(sessionFile, 'utf8');
-      sessionData = JSON.parse(fileContent);
-    } catch (readError) {
-      console.error('Failed to read/parse session file:', readError);
+    const fileContent = safeReadFile(sessionFile);
+    if (!fileContent) {
+      console.error('Failed to read session file:', sessionFile);
       
       // Try to remove corrupted session file
-      try {
-        fs.unlinkSync(sessionFile);
-      } catch (unlinkError) {
-        console.error('Failed to remove corrupted session file:', unlinkError);
-      }
+      safeUnlinkFile(sessionFile);
+      
+      return res.status(500).json({
+        status: 'error',
+        error: 'Failed to read session data'
+      });
+    }
+
+    let sessionData;
+    try {
+      sessionData = JSON.parse(fileContent);
+    } catch (parseError) {
+      console.error('Failed to parse session file:', parseError);
+      
+      // Try to remove corrupted session file
+      safeUnlinkFile(sessionFile);
       
       return res.status(500).json({
         status: 'error',
@@ -245,11 +291,7 @@ export default async function handler(req, res) {
       console.log('Session expired, age:', sessionAge);
       
       // Clean up expired session
-      try {
-        fs.unlinkSync(sessionFile);
-      } catch (unlinkError) {
-        console.error('Failed to remove expired session file:', unlinkError);
-      }
+      safeUnlinkFile(sessionFile);
       
       return res.status(404).json({ 
         status: 'expired',
@@ -264,37 +306,36 @@ export default async function handler(req, res) {
     };
 
     if (sessionData.status === 'completed') {
+      console.log('Session completed, preparing response...');
+      
       // Include authentication data
       if (sessionData.access_token) {
         response.access_token = sessionData.access_token;
         response.refresh_token = sessionData.refresh_token;
         response.expires_in = sessionData.expires_in;
         response.token_type = sessionData.token_type;
+        console.log('Returning access token to client');
       } else if (sessionData.code) {
         // Fallback case where only code is available
         response.code = sessionData.code;
         response.fallback_reason = sessionData.fallback_reason;
+        console.log('Returning authorization code for client-side exchange');
       }
       
       response.state = state;
       
       // Clean up the session after successful retrieval
-      try {
-        fs.unlinkSync(sessionFile);
+      if (safeUnlinkFile(sessionFile)) {
         console.log('Session file cleaned up after successful retrieval');
-      } catch (unlinkError) {
-        console.error('Failed to clean up session file:', unlinkError);
       }
       
     } else if (sessionData.status === 'error') {
       response.error = sessionData.error;
+      console.log('Returning error status:', sessionData.error);
       
       // Clean up error sessions too
-      try {
-        fs.unlinkSync(sessionFile);
+      if (safeUnlinkFile(sessionFile)) {
         console.log('Error session file cleaned up');
-      } catch (unlinkError) {
-        console.error('Failed to clean up error session file:', unlinkError);
       }
     }
 
@@ -302,11 +343,15 @@ export default async function handler(req, res) {
     return res.status(200).json(response);
 
   } catch (error) {
-    console.error('Auth status check error:', error);
+    console.error('=== Auth Status Handler Error ===');
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    
     return res.status(500).json({ 
       status: 'error',
       error: 'Internal server error',
-      message: error.message
+      message: error.message,
+      timestamp: new Date().toISOString()
     });
   }
 }
