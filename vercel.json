@@ -1,5 +1,13 @@
 {
   "version": 2,
+  "functions": {
+    "api/callback.js": {
+      "maxDuration": 30
+    },
+    "api/auth-status.js": {
+      "maxDuration": 15
+    }
+  },
   "rewrites": [
     {
       "source": "/callback",
@@ -24,9 +32,18 @@
         },
         {
           "key": "Access-Control-Allow-Headers",
-          "value": "Content-Type, User-Agent"
+          "value": "Content-Type, User-Agent, Authorization"
+        },
+        {
+          "key": "Cache-Control",
+          "value": "no-cache, no-store, must-revalidate"
         }
       ]
     }
-  ]
+  ],
+  "env": {
+    "PATREON_CLIENT_ID": "@patreon_client_id",
+    "PATREON_CLIENT_SECRET": "@patreon_client_secret", 
+    "PATREON_REDIRECT_URI": "@patreon_redirect_uri"
+  }
 }
