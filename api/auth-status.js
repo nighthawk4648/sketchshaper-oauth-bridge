@@ -1,365 +1,388 @@
-import http from 'http';
-import url from 'url';
 import fs from 'fs';
 import path from 'path';
 
-// Your Patreon OAuth credentials
-const PATREON_CLIENT_ID = 'GhVd_dyhxHNkxgmYCAAjuP-9ohELe-aVI-BaxjeuQ3Shpo1NBEBrveQ9OHiKLDEe';
-const PATREON_CLIENT_SECRET = 'NiL8Ip6NzIeAcsIjZ-hk_61VRt9ONo0JVBvxZsJi2tQ-OUedCuRHKCJTgyoOFFJj';
-const PATREON_REDIRECT_URI = 'https://api2.sketchshaper.com/callback';
+const SESSIONS_DIR = process.env.VERCEL ? '/tmp/auth_sessions' : './tmp/auth_sessions';
+const SESSION_TIMEOUT = 15 * 60 * 1000; // 15 minutes
 
-const PORT = 3000;
-const SESSIONS_DIR = './tmp/auth_sessions';
-
-// Ensure sessions directory exists
-if (!fs.existsSync(SESSIONS_DIR)) {
-  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-  console.log('Created sessions directory:', SESSIONS_DIR);
-}
-
-// Helper to generate state parameter
-function generateState() {
-  return 'oauth_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-}
-
-// Helper to save session data
-function saveSession(state, data) {
-  try {
-    const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
-    const sessionData = {
-      ...data,
-      timestamp: Date.now(),
-      created: new Date().toISOString()
-    };
-    
-    fs.writeFileSync(sessionFile, JSON.stringify(sessionData, null, 2));
-    console.log('✅ Session saved:', sessionFile);
-    return true;
-  } catch (error) {
-    console.error('❌ Failed to save session:', error.message);
-    return false;
+function validateState(state) {
+  console.log('=== STATE VALIDATION ===');
+  console.log('Raw state parameter:', JSON.stringify(state));
+  console.log('State type:', typeof state);
+  console.log('State length:', state?.length);
+  
+  if (!state || typeof state !== 'string') {
+    console.log('❌ State validation failed: Missing or invalid type');
+    return { valid: false, reason: 'Missing or invalid type' };
   }
+  
+  // Log the exact pattern we're testing
+  const hexTimestampPattern = /^[a-fA-F0-9]+_\d+$/;
+  const patternMatch = hexTimestampPattern.test(state);
+  console.log('Pattern test (hex_timestamp):', patternMatch);
+  console.log('Expected pattern: /^[a-fA-F0-9]+_\\d+$/');
+  
+  if (!patternMatch) {
+    console.log('❌ State validation failed: Pattern mismatch');
+    console.log('State characters breakdown:');
+    for (let i = 0; i < state.length; i++) {
+      const char = state[i];
+      const code = char.charCodeAt(0);
+      console.log(`  [${i}]: '${char}' (${code})`);
+    }
+    return { valid: false, reason: 'Pattern mismatch', patternMatch: false };
+  }
+  
+  const parts = state.split('_');
+  console.log('State parts after split:', parts);
+  
+  if (parts.length !== 2) {
+    console.log('❌ State validation failed: Invalid format - expected exactly one underscore');
+    return { valid: false, reason: 'Invalid underscore count', parts: parts.length };
+  }
+  
+  const hexPart = parts[0];
+  const timestampPart = parts[1];
+  console.log('Hex part:', hexPart);
+  console.log('Timestamp part:', timestampPart);
+  
+  const timestamp = parseInt(timestampPart);
+  const now = Date.now();
+  const maxAge = 30 * 60 * 1000; // 30 minutes
+  
+  console.log('Timestamp validation details:', {
+    stateTimestamp: timestamp,
+    currentTime: now,
+    timestampDate: new Date(timestamp).toISOString(),
+    currentDate: new Date(now).toISOString(),
+    age: now - timestamp,
+    maxAge: maxAge,
+    ageInMinutes: (now - timestamp) / (1000 * 60),
+    maxAgeInMinutes: maxAge / (1000 * 60)
+  });
+  
+  if (timestamp <= 0 || isNaN(timestamp)) {
+    console.log('❌ State validation failed: Invalid timestamp');
+    return { valid: false, reason: 'Invalid timestamp', timestamp };
+  }
+  
+  if (timestamp > now) {
+    console.log('❌ State validation failed: Timestamp is in the future');
+    return { valid: false, reason: 'Future timestamp', timestamp, now };
+  }
+  
+  if ((now - timestamp) > maxAge) {
+    console.log('❌ State validation failed: Timestamp too old');
+    return { valid: false, reason: 'Expired timestamp', age: now - timestamp, maxAge };
+  }
+  
+  console.log('✅ State validation passed');
+  return { valid: true };
 }
 
-// Helper to load session data
-function loadSession(state) {
+function debugSessionsDirectory() {
+  console.log('=== SESSIONS DIRECTORY DEBUG ===');
+  console.log('Sessions directory path:', SESSIONS_DIR);
+  console.log('Environment:', process.env.VERCEL ? 'Vercel' : 'Local');
+  
   try {
-    const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
-    if (!fs.existsSync(sessionFile)) {
-      return null;
+    const exists = fs.existsSync(SESSIONS_DIR);
+    console.log('Directory exists:', exists);
+    
+    if (!exists) {
+      console.log('❌ Sessions directory does not exist');
+      return { accessible: false, reason: 'Directory does not exist' };
     }
     
-    const content = fs.readFileSync(sessionFile, 'utf8');
-    return JSON.parse(content);
-  } catch (error) {
-    console.error('❌ Failed to load session:', error.message);
-    return null;
-  }
-}
-
-// Patreon OAuth callback handler
-async function handleCallback(req, res, query) {
-  console.log('=== PATREON CALLBACK ===');
-  console.log('Query params:', query);
-  
-  const { code, state, error } = query;
-  
-  if (error) {
-    console.error('OAuth error:', error);
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ 
-      success: false, 
-      error: 'OAuth error', 
-      details: error 
-    }));
-    return;
-  }
-  
-  if (!code || !state) {
-    console.error('Missing code or state parameter');
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ 
-      success: false, 
-      error: 'Missing required parameters (code or state)' 
-    }));
-    return;
-  }
-  
-  try {
-    // Exchange code for access token
-    console.log('Exchanging code for access token...');
+    // List all files in the directory
+    const files = fs.readdirSync(SESSIONS_DIR);
+    console.log('Files in sessions directory:', files);
+    console.log('Number of session files:', files.length);
     
-    const tokenParams = new URLSearchParams({
-      client_id: PATREON_CLIENT_ID,
-      client_secret: PATREON_CLIENT_SECRET,
-      grant_type: 'authorization_code',
-      code: code,
-      redirect_uri: PATREON_REDIRECT_URI
-    });
-    
-    const tokenResponse = await fetch('https://www.patreon.com/api/oauth2/token', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: tokenParams
-    });
-    
-    if (!tokenResponse.ok) {
-      const errorText = await tokenResponse.text();
-      console.error('Token exchange failed:', tokenResponse.status, errorText);
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ 
-        success: false, 
-        error: 'Token exchange failed',
-        status: tokenResponse.status,
-        details: errorText
-      }));
-      return;
-    }
-    
-    const tokenData = await tokenResponse.json();
-    console.log('✅ Token exchange successful');
-    console.log('Token data keys:', Object.keys(tokenData));
-    
-    // Get user info
-    console.log('Fetching user info...');
-    const userResponse = await fetch('https://www.patreon.com/api/oauth2/v2/identity?include=memberships&fields%5Buser%5D=email,first_name,last_name,full_name,image_url', {
-      headers: {
-        'Authorization': `Bearer ${tokenData.access_token}`
+    // Show details of each file
+    files.forEach(file => {
+      try {
+        const filePath = path.join(SESSIONS_DIR, file);
+        const stats = fs.statSync(filePath);
+        const age = Date.now() - stats.mtime.getTime();
+        console.log(`  📄 ${file}:`);
+        console.log(`     Size: ${stats.size} bytes`);
+        console.log(`     Modified: ${stats.mtime.toISOString()}`);
+        console.log(`     Age: ${Math.round(age / 1000)} seconds`);
+        console.log(`     Expired: ${age > SESSION_TIMEOUT}`);
+        
+        // Try to read the file content
+        if (file.endsWith('.json')) {
+          try {
+            const content = fs.readFileSync(filePath, 'utf8');
+            const data = JSON.parse(content);
+            console.log(`     Status: ${data.status}`);
+            console.log(`     Timestamp: ${data.timestamp ? new Date(data.timestamp).toISOString() : 'N/A'}`);
+          } catch (readError) {
+            console.log(`     ❌ Failed to read/parse: ${readError.message}`);
+          }
+        }
+      } catch (fileError) {
+        console.log(`  ❌ Error accessing ${file}: ${fileError.message}`);
       }
     });
     
-    if (!userResponse.ok) {
-      const errorText = await userResponse.text();
-      console.error('User info fetch failed:', userResponse.status, errorText);
-    }
-    
-    const userData = userResponse.ok ? await userResponse.json() : null;
-    
-    // Save complete session data
-    const sessionData = {
-      status: 'completed',
-      access_token: tokenData.access_token,
-      refresh_token: tokenData.refresh_token,
-      expires_in: tokenData.expires_in,
-      token_type: tokenData.token_type,
-      scope: tokenData.scope,
-      user_data: userData,
-      completed_at: new Date().toISOString()
-    };
-    
-    const saved = saveSession(state, sessionData);
-    
-    if (!saved) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ 
-        success: false, 
-        error: 'Failed to save session data' 
-      }));
-      return;
-    }
-    
-    // Return success response
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      success: true,
-      message: 'OAuth flow completed successfully',
-      state: state,
-      user: userData ? {
-        id: userData.data?.id,
-        name: userData.data?.attributes?.full_name,
-        email: userData.data?.attributes?.email
-      } : null,
-      expires_in: tokenData.expires_in,
-      timestamp: new Date().toISOString()
-    }));
+    return { accessible: true, fileCount: files.length, files };
     
   } catch (error) {
-    console.error('❌ Callback handler error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ 
-      success: false, 
-      error: 'Internal server error',
-      details: error.message
-    }));
+    console.log('❌ Failed to access sessions directory:', error.message);
+    return { accessible: false, reason: error.message };
   }
 }
 
-// Auth status handler
-async function handleAuthStatus(req, res, query) {
-  console.log('=== AUTH STATUS CHECK ===');
-  console.log('Query params:', query);
+function debugSessionFile(state) {
+  console.log('=== SESSION FILE DEBUG ===');
+  const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
+  console.log('Expected session file path:', sessionFile);
   
-  const { state } = query;
+  const exists = fs.existsSync(sessionFile);
+  console.log('Session file exists:', exists);
   
-  if (!state) {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ 
-      success: false, 
-      error: 'State parameter required' 
-    }));
-    return;
-  }
-  
-  const sessionData = loadSession(state);
-  
-  if (!sessionData) {
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ 
-      success: false, 
-      status: 'not_found',
-      message: 'Session not found'
-    }));
-    return;
-  }
-  
-  // Check if token is expired
-  const now = Date.now();
-  const tokenAge = now - sessionData.timestamp;
-  const expiresInMs = (sessionData.expires_in || 3600) * 1000;
-  const isExpired = tokenAge > expiresInMs;
-  
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({
-    success: true,
-    status: sessionData.status,
-    has_token: !!sessionData.access_token,
-    is_expired: isExpired,
-    expires_in: sessionData.expires_in,
-    token_age_seconds: Math.floor(tokenAge / 1000),
-    user: sessionData.user_data ? {
-      id: sessionData.user_data.data?.id,
-      name: sessionData.user_data.data?.attributes?.full_name,
-      email: sessionData.user_data.data?.attributes?.email
-    } : null,
-    created: sessionData.created,
-    timestamp: new Date().toISOString()
-  }));
-}
-
-// OAuth initiation handler
-function handleOAuthStart(req, res, query) {
-  console.log('=== STARTING OAUTH FLOW ===');
-  
-  const state = generateState();
-  console.log('Generated state:', state);
-  
-  // Save initial session
-  const initialSession = {
-    status: 'initiated',
-    redirect_uri: PATREON_REDIRECT_URI,
-    initiated_at: new Date().toISOString()
-  };
-  
-  saveSession(state, initialSession);
-  
-  // Build Patreon authorization URL
-  const authParams = new URLSearchParams({
-    response_type: 'code',
-    client_id: PATREON_CLIENT_ID,
-    redirect_uri: PATREON_REDIRECT_URI,
-    state: state,
-    scope: 'identity identity[email] identity.memberships'
-  });
-  
-  const authUrl = `https://www.patreon.com/oauth2/authorize?${authParams}`;
-  
-  console.log('Authorization URL:', authUrl);
-  
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({
-    success: true,
-    auth_url: authUrl,
-    state: state,
-    message: 'Visit the auth_url to complete OAuth flow',
-    timestamp: new Date().toISOString()
-  }));
-}
-
-// Main server
-const server = http.createServer(async (req, res) => {
-  const parsedUrl = url.parse(req.url, true);
-  const pathname = parsedUrl.pathname;
-  const query = parsedUrl.query;
-  
-  console.log(`${new Date().toISOString()} - ${req.method} ${pathname}`);
-  
-  // CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  
-  if (req.method === 'OPTIONS') {
-    res.writeHead(200);
-    res.end();
-    return;
+  if (!exists) {
+    console.log('❌ Session file not found');
+    
+    // Check for similar files (in case of state mismatch)
+    try {
+      const files = fs.readdirSync(SESSIONS_DIR);
+      const jsonFiles = files.filter(f => f.endsWith('.json'));
+      console.log('Available session files:', jsonFiles);
+      
+      // Look for files with similar patterns
+      const statePrefix = state.split('_')[0];
+      const similarFiles = jsonFiles.filter(f => f.startsWith(statePrefix));
+      if (similarFiles.length > 0) {
+        console.log('⚠️  Found files with similar state prefix:', similarFiles);
+      }
+      
+    } catch (listError) {
+      console.log('Failed to list directory for comparison:', listError.message);
+    }
+    
+    return { found: false };
   }
   
   try {
-    if (pathname === '/callback' || pathname === '/api/callback') {
-      await handleCallback(req, res, query);
-    } else if (pathname === '/auth-status' || pathname === '/api/auth-status') {
-      await handleAuthStatus(req, res, query);
-    } else if (pathname === '/start-auth' || pathname === '/api/start-auth') {
-      handleOAuthStart(req, res, query);
-    } else if (pathname === '/health') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ 
-        status: 'ok', 
-        timestamp: new Date().toISOString(),
-        environment: 'real-oauth',
-        patreon_client_id: PATREON_CLIENT_ID.substring(0, 10) + '...',
-        sessions_dir: SESSIONS_DIR
-      }));
-    } else if (pathname === '/') {
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end(`
-        <html>
-          <head><title>Patreon OAuth Server</title></head>
-          <body>
-            <h1>Patreon OAuth Server</h1>
-            <p><strong>Available endpoints:</strong></p>
-            <ul>
-              <li><a href="/health">/health</a> - Server health check</li>
-              <li><a href="/start-auth">/start-auth</a> - Start OAuth flow</li>
-              <li><a href="/auth-status?state=YOUR_STATE">/auth-status?state=STATE</a> - Check auth status</li>
-              <li>/callback - OAuth callback (used by Patreon)</li>
-            </ul>
-            <p><strong>Usage:</strong></p>
-            <ol>
-              <li>Visit <a href="/start-auth">/start-auth</a> to get authorization URL</li>
-              <li>Visit the returned auth_url to authenticate with Patreon</li>
-              <li>Check status with /auth-status?state=YOUR_STATE</li>
-            </ol>
-          </body>
-        </html>
-      `);
-    } else {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('Not Found');
-    }
+    const stats = fs.statSync(sessionFile);
+    const content = fs.readFileSync(sessionFile, 'utf8');
+    const data = JSON.parse(content);
+    
+    console.log('✅ Session file found and readable');
+    console.log('File size:', stats.size, 'bytes');
+    console.log('File modified:', stats.mtime.toISOString());
+    console.log('File age:', Math.round((Date.now() - stats.mtime.getTime()) / 1000), 'seconds');
+    console.log('Session data:', JSON.stringify(data, null, 2));
+    
+    return { found: true, data, stats };
+    
   } catch (error) {
-    console.error('Server error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ 
-      error: 'Internal server error', 
-      message: error.message 
-    }));
+    console.log('❌ Failed to read session file:', error.message);
+    return { found: true, error: error.message };
   }
-});
+}
 
-server.listen(PORT, () => {
-  console.log('🚀 Real Patreon OAuth Server running on http://localhost:' + PORT);
-  console.log('📍 OAuth endpoints:');
-  console.log('  http://localhost:' + PORT + '/start-auth - Start OAuth flow');
-  console.log('  http://localhost:' + PORT + '/health - Health check');
-  console.log('  http://localhost:' + PORT + '/ - Web interface');
-  console.log('');
-  console.log('🔑 Using Patreon Client ID:', PATREON_CLIENT_ID.substring(0, 10) + '...');
-  console.log('📁 Sessions directory:', SESSIONS_DIR);
-});
+export default async function handler(req, res) {
+  console.log('=== ENHANCED AUTH STATUS DEBUG HANDLER ===');
+  console.log('Timestamp:', new Date().toISOString());
+  console.log('Method:', req.method);
+  console.log('URL:', req.url);
+  console.log('User-Agent:', req.headers['user-agent']);
+  console.log('Query parameters:', JSON.stringify(req.query, null, 2));
 
-server.on('error', (error) => {
-  console.error('Server error:', error);
-});
+  try {
+    // Set CORS headers
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, User-Agent');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+    if (req.method === 'OPTIONS') {
+      return res.status(200).end();
+    }
+
+    if (req.method !== 'GET') {
+      console.error('❌ Invalid method:', req.method);
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+    const { state } = req.query;
+
+    if (!state) {
+      console.error('❌ Missing state parameter');
+      return res.status(400).json({ 
+        status: 'error',
+        error: 'State parameter required',
+        debug: {
+          queryParams: req.query,
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    // Enhanced state validation with detailed debugging
+    const stateValidation = validateState(state);
+    
+    if (!stateValidation.valid) {
+      console.error('❌ State validation failed:', stateValidation.reason);
+      return res.status(400).json({
+        status: 'error',
+        error: 'Invalid authentication state',
+        debug: {
+          state: state,
+          validation: stateValidation,
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    // Debug sessions directory
+    const directoryDebug = debugSessionsDirectory();
+    
+    if (!directoryDebug.accessible) {
+      console.error('❌ Sessions directory not accessible:', directoryDebug.reason);
+      return res.status(500).json({
+        status: 'error',
+        error: 'Server configuration error',
+        debug: {
+          directory: directoryDebug,
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    // Debug specific session file
+    const sessionDebug = debugSessionFile(state);
+    
+    if (!sessionDebug.found) {
+      console.log('❌ Session not found, returning pending status');
+      return res.status(404).json({ 
+        status: 'pending',
+        message: 'Authentication session not found or still pending',
+        debug: {
+          state: state,
+          sessionFile: `${state}.json`,
+          directory: directoryDebug,
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    if (sessionDebug.error) {
+      console.error('❌ Session file error:', sessionDebug.error);
+      return res.status(500).json({
+        status: 'error',
+        error: 'Failed to read session data',
+        debug: {
+          sessionError: sessionDebug.error,
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    const sessionData = sessionDebug.data;
+
+    // Check session age
+    const now = Date.now();
+    const sessionAge = now - (sessionData.timestamp || 0);
+    
+    console.log('Session age check:', {
+      sessionTimestamp: sessionData.timestamp,
+      currentTime: now,
+      age: sessionAge,
+      ageInMinutes: sessionAge / (1000 * 60),
+      timeout: SESSION_TIMEOUT,
+      timeoutInMinutes: SESSION_TIMEOUT / (1000 * 60),
+      expired: sessionAge > SESSION_TIMEOUT
+    });
+    
+    if (sessionAge > SESSION_TIMEOUT) {
+      console.log('❌ Session expired, cleaning up...');
+      
+      try {
+        const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
+        fs.unlinkSync(sessionFile);
+        console.log('✅ Expired session cleaned up');
+      } catch (cleanupError) {
+        console.error('Failed to cleanup expired session:', cleanupError.message);
+      }
+      
+      return res.status(404).json({ 
+        status: 'expired',
+        message: 'Authentication session expired',
+        debug: {
+          age: sessionAge,
+          timeout: SESSION_TIMEOUT,
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    // Prepare successful response
+    const response = {
+      status: sessionData.status,
+      timestamp: sessionData.timestamp
+    };
+
+    if (sessionData.status === 'completed') {
+      console.log('✅ Session completed successfully');
+      
+      if (sessionData.access_token) {
+        response.access_token = sessionData.access_token;
+        response.refresh_token = sessionData.refresh_token;
+        response.expires_in = sessionData.expires_in;
+        response.token_type = sessionData.token_type;
+        console.log('Returning access token');
+      } else if (sessionData.code) {
+        response.code = sessionData.code;
+        response.fallback_reason = sessionData.fallback_reason;
+        console.log('Returning authorization code');
+      }
+      
+      response.state = state;
+      
+      // Clean up successful session
+      try {
+        const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
+        fs.unlinkSync(sessionFile);
+        console.log('✅ Completed session cleaned up');
+      } catch (cleanupError) {
+        console.error('Failed to cleanup completed session:', cleanupError.message);
+      }
+      
+    } else if (sessionData.status === 'error') {
+      console.log('❌ Session has error status:', sessionData.error);
+      response.error = sessionData.error;
+      
+      // Clean up error session
+      try {
+        const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
+        fs.unlinkSync(sessionFile);
+        console.log('✅ Error session cleaned up');
+      } catch (cleanupError) {
+        console.error('Failed to cleanup error session:', cleanupError.message);
+      }
+    }
+
+    console.log('✅ Returning successful response:', response.status);
+    return res.status(200).json(response);
+
+  } catch (error) {
+    console.error('=== CRITICAL ERROR IN AUTH STATUS HANDLER ===');
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    console.error('Error name:', error.name);
+    
+    return res.status(500).json({ 
+      status: 'error',
+      error: 'Internal server error',
+      debug: {
+        message: error.message,
+        name: error.name,
+        timestamp: new Date().toISOString()
+      }
+    });
+  }
+}
