@@ -1,11 +1,16 @@
-// api/callback.js - Fixed version with better error handling and logging
+// api/callback.js - Redis version (recommended for production)
+import Redis from 'ioredis';
 
-// Initialize global storage for auth sessions (in production, use Redis or database)
-if (!global.authSessions) {
-  global.authSessions = new Map();
+// Initialize Redis client
+let redis;
+try {
+  redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+  console.log('Redis client initialized');
+} catch (error) {
+  console.error('Redis initialization failed:', error);
 }
 
-export default function handler(req, res) {
+export default async function handler(req, res) {
   // Enable CORS for your domain
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -26,21 +31,26 @@ export default function handler(req, res) {
     console.log('Code present:', !!code);
     console.log('State:', state);
     console.log('Error:', error);
-    console.log('Current sessions:', Array.from(global.authSessions.keys()));
+    console.log('Redis available:', !!redis);
 
     // Handle OAuth errors
     if (error) {
       console.error('OAuth error:', error, error_description);
       
-      // Store error in session
-      if (state) {
+      // Store error in Redis if available
+      if (state && redis) {
         const errorSession = {
           status: 'error',
           error: error_description || error,
           timestamp: Date.now()
         };
-        global.authSessions.set(state, errorSession);
-        console.log('Error session stored for state:', state);
+        
+        try {
+          await redis.setex(`auth:${state}`, 600, JSON.stringify(errorSession)); // 10 minutes
+          console.log('Error session stored in Redis for state:', state);
+        } catch (redisError) {
+          console.error('Redis error storing error session:', redisError);
+        }
       }
 
       return res.status(400).send(getErrorHTML(error_description || error));
@@ -52,22 +62,59 @@ export default function handler(req, res) {
       return res.status(400).send(getErrorHTML('Missing required authentication parameters'));
     }
 
-    // Store the authorization code for the SketchUp extension to retrieve
+    // Store the authorization code
     const session = {
       status: 'completed',
       code: code,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      nodeId: process.env.VERCEL_REGION || 'unknown'
     };
 
-    global.authSessions.set(state, session);
+    // Try Redis first, fallback to global storage
+    let stored = false;
+    
+    if (redis) {
+      try {
+        await redis.setex(`auth:${state}`, 600, JSON.stringify(session)); // 10 minutes TTL
+        console.log('Session stored in Redis for state:', state);
+        stored = true;
+        
+        // Verify storage
+        const verification = await redis.get(`auth:${state}`);
+        if (!verification) {
+          console.error('Redis verification failed - session not retrievable');
+          stored = false;
+        } else {
+          console.log('Redis verification successful');
+        }
+      } catch (redisError) {
+        console.error('Redis storage error:', redisError);
+        stored = false;
+      }
+    }
+
+    // Fallback to global storage if Redis failed
+    if (!stored) {
+      console.log('Falling back to global storage');
+      if (!global.authSessions) {
+        global.authSessions = new Map();
+      }
+      global.authSessions.set(state, session);
+      console.log('Session stored in global storage');
+    }
+
     console.log('=== SESSION STORED ===');
     console.log('State:', state);
+    console.log('Storage method:', stored ? 'Redis' : 'Global');
     console.log('Session:', session);
-    console.log('Total sessions now:', global.authSessions.size);
-    console.log('All session keys:', Array.from(global.authSessions.keys()));
 
     // Return success page
-    return res.status(200).send(getSuccessHTML());
+    return res.status(200).send(getSuccessHTML({
+      state: state,
+      timestamp: new Date(session.timestamp).toISOString(),
+      nodeId: session.nodeId,
+      storageMethod: stored ? 'Redis' : 'Global'
+    }));
 
   } catch (error) {
     console.error('Callback handler error:', error);
@@ -95,7 +142,7 @@ function getErrorHTML(message) {
   `;
 }
 
-function getSuccessHTML() {
+function getSuccessHTML(debugInfo = {}) {
   return `
     <!DOCTYPE html>
     <html>
@@ -135,6 +182,15 @@ function getSuccessHTML() {
           margin: 0 auto 20px;
           font-size: 24px;
         }
+        .debug { 
+          font-size: 12px; 
+          color: #666; 
+          margin-top: 20px; 
+          text-align: left;
+          background: #f7f7f7;
+          padding: 10px;
+          border-radius: 4px;
+        }
       </style>
     </head>
     <body>
@@ -146,6 +202,15 @@ function getSuccessHTML() {
         <p style="font-size: 14px; color: #718096; margin-top: 30px;">
           Your SketchShaper Pro extension will automatically detect the successful authentication.
         </p>
+        ${debugInfo.state ? `
+        <div class="debug">
+          <strong>Debug Info:</strong><br>
+          State: ${debugInfo.state}<br>
+          Stored: ${debugInfo.timestamp}<br>
+          Storage: ${debugInfo.storageMethod}<br>
+          Node: ${debugInfo.nodeId}
+        </div>
+        ` : ''}
       </div>
     </body>
     </html>
