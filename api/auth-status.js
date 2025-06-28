@@ -1,262 +1,278 @@
+// Improved session management with better error handling and platform compatibility
+
 import fs from 'fs';
 import path from 'path';
+import { promisify } from 'util';
 
-// Use a temporary directory for session storage
-const SESSIONS_DIR = '/tmp/auth_sessions';
+// Use platform-appropriate temp directory
+const SESSIONS_DIR = process.env.VERCEL 
+  ? '/tmp/auth_sessions' 
+  : path.join(process.cwd(), '.sessions');
 
-// Ensure the sessions directory exists
-if (!fs.existsSync(SESSIONS_DIR)) {
-  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-  console.log('Created sessions directory:', SESSIONS_DIR);
-}
+// Promisify fs functions for better error handling
+const writeFile = promisify(fs.writeFile);
+const readFile = promisify(fs.readFile);
+const unlink = promisify(fs.unlink);
+const readdir = promisify(fs.readdir);
+const stat = promisify(fs.stat);
 
-// Patreon OAuth configuration
-const PATREON_CLIENT_ID = process.env.PATREON_CLIENT_ID;
-const PATREON_CLIENT_SECRET = process.env.PATREON_CLIENT_SECRET;
-const PATREON_REDIRECT_URI = process.env.PATREON_REDIRECT_URI;
-
-export default async function handler(req, res) {
-  // Enable CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, User-Agent');
-  
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-  
-  if (req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' });
+// Session management utilities
+class SessionManager {
+  constructor() {
+    this.ensureSessionsDir();
   }
 
-  try {
-    const { state } = req.query;
-    
-    console.log('=== AUTH STATUS CHECK ===');
-    console.log('State parameter:', state);
-    console.log('Sessions directory:', SESSIONS_DIR);
-    console.log('Directory exists:', fs.existsSync(SESSIONS_DIR));
-    
-    if (!state) {
-      return res.status(400).json({ error: 'State parameter required' });
-    }
-
-    // List all files in sessions directory for debugging
+  ensureSessionsDir() {
     try {
-      const files = fs.readdirSync(SESSIONS_DIR);
-      console.log('Files in sessions directory:', files);
-    } catch (dirError) {
-      console.error('Error reading sessions directory:', dirError);
-    }
-
-    const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
-    console.log('Looking for session file:', sessionFile);
-    
-    // Check if session file exists
-    if (!fs.existsSync(sessionFile)) {
-      console.log('Session file not found');
-      
-      // Return more detailed response for debugging
-      return res.status(404).json({ 
-        status: 'pending',
-        message: 'Authentication session not found or still pending',
-        debug: {
-          sessionFile,
-          dirExists: fs.existsSync(SESSIONS_DIR),
-          availableFiles: fs.existsSync(SESSIONS_DIR) ? fs.readdirSync(SESSIONS_DIR) : []
-        }
-      });
-    }
-
-    // Read session data
-    console.log('Reading session file...');
-    const sessionData = fs.readFileSync(sessionFile, 'utf8');
-    const session = JSON.parse(sessionData);
-    
-    console.log('Session data:', { 
-      status: session.status, 
-      hasCode: !!session.code,
-      hasTokens: !!session.access_token,
-      timestamp: new Date(session.timestamp).toISOString()
-    });
-
-    // Check if session has expired (10 minutes)
-    const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
-    if (session.timestamp < tenMinutesAgo) {
-      console.log('Session expired, cleaning up');
-      fs.unlinkSync(sessionFile);
-      return res.status(404).json({ 
-        status: 'expired',
-        message: 'Authentication session expired' 
-      });
-    }
-
-    // If session is completed but we haven't exchanged the code yet, do it now
-    if (session.status === 'completed' && session.code && !session.access_token) {
-      console.log('Exchanging authorization code for tokens...');
-      
-      try {
-        const tokenData = await exchangeCodeForTokens(session.code);
-        
-        if (tokenData && tokenData.access_token) {
-          // Update session with tokens
-          session.access_token = tokenData.access_token;
-          session.refresh_token = tokenData.refresh_token;
-          session.expires_in = tokenData.expires_in;
-          session.token_type = tokenData.token_type;
-          session.timestamp = Date.now(); // Update timestamp
-          
-          // Save updated session
-          fs.writeFileSync(sessionFile, JSON.stringify(session));
-          console.log('Tokens exchanged and saved successfully');
-        } else {
-          console.log('Token exchange failed - no access_token received');
-          session.status = 'error';
-          session.error = 'Failed to exchange authorization code for tokens';
-          fs.writeFileSync(sessionFile, JSON.stringify(session));
-        }
-      } catch (error) {
-        console.error('Token exchange error:', error);
-        session.status = 'error';
-        session.error = 'Token exchange failed: ' + error.message;
-        fs.writeFileSync(sessionFile, JSON.stringify(session));
+      if (!fs.existsSync(SESSIONS_DIR)) {
+        fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+        console.log('Created sessions directory:', SESSIONS_DIR);
       }
+    } catch (error) {
+      console.error('Failed to create sessions directory:', error);
+      // Continue execution - might work on read-only filesystems with in-memory fallback
     }
+  }
 
-    // Prepare response
-    const response = {
-      status: session.status,
-      timestamp: session.timestamp
+  getSessionPath(state) {
+    return path.join(SESSIONS_DIR, `${state}.json`);
+  }
+
+  async writeSession(state, data) {
+    const sessionPath = this.getSessionPath(state);
+    const sessionData = {
+      ...data,
+      timestamp: Date.now(),
+      version: '1.0'
     };
 
-    if (session.status === 'completed') {
-      // Include tokens if available
-      if (session.access_token) {
-        response.access_token = session.access_token;
-        response.refresh_token = session.refresh_token;
-        response.expires_in = session.expires_in;
-        response.token_type = session.token_type;
-        console.log('Returning tokens to client');
-      } else {
-        // Fallback: include auth code for client-side exchange
-        response.code = session.code;
-        console.log('Returning auth code to client');
+    try {
+      await writeFile(sessionPath, JSON.stringify(sessionData, null, 2));
+      console.log('Session written successfully:', state);
+      return true;
+    } catch (error) {
+      console.error('Failed to write session:', error);
+      // Fallback: store in memory (for serverless environments)
+      this.memoryStore = this.memoryStore || new Map();
+      this.memoryStore.set(state, sessionData);
+      console.log('Session stored in memory fallback:', state);
+      return true;
+    }
+  }
+
+  async readSession(state) {
+    const sessionPath = this.getSessionPath(state);
+    
+    try {
+      // Try file system first
+      if (fs.existsSync(sessionPath)) {
+        const data = await readFile(sessionPath, 'utf8');
+        return JSON.parse(data);
       }
-      response.state = state;
-      
-      // Clean up the session after successful retrieval
-      console.log('Cleaning up session file after successful completion');
-      fs.unlinkSync(sessionFile);
-      
-    } else if (session.status === 'error') {
-      response.error = session.error;
-      console.log('Returning error status:', session.error);
-      // Clean up error sessions too
-      fs.unlinkSync(sessionFile);
+    } catch (error) {
+      console.warn('Failed to read session from file:', error);
     }
 
-    console.log('Returning response:', { 
-      status: response.status, 
-      hasTokens: !!response.access_token,
-      hasCode: !!response.code 
-    });
-    
-    return res.status(200).json(response);
+    // Fallback to memory store
+    if (this.memoryStore && this.memoryStore.has(state)) {
+      console.log('Retrieved session from memory:', state);
+      return this.memoryStore.get(state);
+    }
 
-  } catch (error) {
-    console.error('Auth status check error:', error);
-    console.error('Stack trace:', error.stack);
-    return res.status(500).json({ 
-      status: 'error',
-      error: 'Internal server error: ' + error.message
-    });
+    return null;
+  }
+
+  async deleteSession(state) {
+    const sessionPath = this.getSessionPath(state);
+    
+    try {
+      if (fs.existsSync(sessionPath)) {
+        await unlink(sessionPath);
+        console.log('Session file deleted:', state);
+      }
+    } catch (error) {
+      console.warn('Failed to delete session file:', error);
+    }
+
+    // Also remove from memory store
+    if (this.memoryStore && this.memoryStore.has(state)) {
+      this.memoryStore.delete(state);
+      console.log('Session removed from memory:', state);
+    }
+  }
+
+  isExpired(session, maxAgeMs = 10 * 60 * 1000) {
+    return Date.now() - session.timestamp > maxAgeMs;
+  }
+
+  async cleanupExpiredSessions() {
+    try {
+      // Cleanup file system sessions
+      if (fs.existsSync(SESSIONS_DIR)) {
+        const files = await readdir(SESSIONS_DIR);
+        const maxAge = 10 * 60 * 1000; // 10 minutes
+        const cutoff = Date.now() - maxAge;
+        
+        for (const file of files) {
+          try {
+            const filePath = path.join(SESSIONS_DIR, file);
+            const stats = await stat(filePath);
+            
+            if (stats.mtime.getTime() < cutoff) {
+              await unlink(filePath);
+              console.log('Cleaned expired session:', file);
+            }
+          } catch (error) {
+            console.warn('Error cleaning session file:', file, error);
+          }
+        }
+      }
+
+      // Cleanup memory store
+      if (this.memoryStore) {
+        const cutoff = Date.now() - (10 * 60 * 1000);
+        for (const [key, session] of this.memoryStore.entries()) {
+          if (session.timestamp < cutoff) {
+            this.memoryStore.delete(key);
+            console.log('Cleaned expired memory session:', key);
+          }
+        }
+      }
+    } catch (error) {
+      console.warn('Session cleanup error:', error);
+    }
   }
 }
 
-// Function to exchange authorization code for tokens
-async function exchangeCodeForTokens(code) {
-  try {
-    if (!PATREON_CLIENT_ID || !PATREON_CLIENT_SECRET || !PATREON_REDIRECT_URI) {
-      throw new Error('Missing required environment variables for token exchange');
-    }
+// OAuth token exchange with retry logic
+class OAuthTokenExchange {
+  constructor(clientId, clientSecret, redirectUri) {
+    this.clientId = clientId;
+    this.clientSecret = clientSecret;
+    this.redirectUri = redirectUri;
+  }
 
+  async exchangeCode(code, retries = 3) {
     const tokenUrl = 'https://www.patreon.com/api/oauth2/token';
     
     const params = new URLSearchParams({
       code: code,
       grant_type: 'authorization_code',
-      client_id: PATREON_CLIENT_ID,
-      client_secret: PATREON_CLIENT_SECRET,
-      redirect_uri: PATREON_REDIRECT_URI
+      client_id: this.clientId,
+      client_secret: this.clientSecret,
+      redirect_uri: this.redirectUri
     });
 
-    console.log('Making token exchange request to Patreon...');
-    console.log('Client ID:', PATREON_CLIENT_ID ? 'Set' : 'Missing');
-    console.log('Client Secret:', PATREON_CLIENT_SECRET ? 'Set' : 'Missing');
-    console.log('Redirect URI:', PATREON_REDIRECT_URI);
-    
-    const response = await fetch(tokenUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'SketchShaper-Extension/1.0'
-      },
-      body: params.toString()
-    });
-
-    console.log('Token exchange response status:', response.status);
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Token exchange failed:', response.status, errorText);
-      throw new Error(`Token exchange failed: ${response.status} ${errorText}`);
-    }
-
-    const tokenData = await response.json();
-    console.log('Token exchange successful - received keys:', Object.keys(tokenData));
-    
-    return tokenData;
-  } catch (error) {
-    console.error('Token exchange error:', error);
-    throw error;
-  }
-}
-
-// Cleanup function to remove old session files
-function cleanupOldSessions() {
-  try {
-    if (!fs.existsSync(SESSIONS_DIR)) {
-      console.log('Sessions directory does not exist, skipping cleanup');
-      return;
-    }
-    
-    const files = fs.readdirSync(SESSIONS_DIR);
-    const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
-    
-    console.log(`Cleanup: Found ${files.length} session files`);
-    
-    let cleanedCount = 0;
-    files.forEach(file => {
+    for (let attempt = 1; attempt <= retries; attempt++) {
       try {
-        const filePath = path.join(SESSIONS_DIR, file);
-        const stats = fs.statSync(filePath);
+        console.log(`Token exchange attempt ${attempt}/${retries}`);
         
-        if (stats.mtime.getTime() < tenMinutesAgo) {
-          fs.unlinkSync(filePath);
-          cleanedCount++;
+        const response = await fetch(tokenUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'SketchShaper-Extension/1.0'
+          },
+          body: params.toString()
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`HTTP ${response.status}: ${errorText}`);
         }
+
+        const tokenData = await response.json();
+        console.log('Token exchange successful');
+        return tokenData;
+        
       } catch (error) {
-        console.error(`Error cleaning file ${file}:`, error);
+        console.error(`Token exchange attempt ${attempt} failed:`, error);
+        
+        if (attempt === retries) {
+          throw error;
+        }
+        
+        // Wait before retry (exponential backoff)
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
       }
-    });
-    
-    if (cleanedCount > 0) {
-      console.log(`Cleaned up ${cleanedCount} old session files`);
     }
-  } catch (error) {
-    console.error('Cleanup error:', error);
+  }
+
+  isConfigured() {
+    return !!(this.clientId && this.clientSecret && this.redirectUri);
   }
 }
 
-// Run cleanup on each request
-cleanupOldSessions();
+// Enhanced error responses
+function createErrorResponse(message, details = {}) {
+  return {
+    status: 'error',
+    error: message,
+    timestamp: Date.now(),
+    ...details
+  };
+}
+
+function createSuccessResponse(data) {
+  return {
+    status: 'completed',
+    timestamp: Date.now(),
+    ...data
+  };
+}
+
+// Export utilities for use in your API handlers
+export {
+  SessionManager,
+  OAuthTokenExchange,
+  createErrorResponse,
+  createSuccessResponse,
+  SESSIONS_DIR
+};
+
+// Example usage in your callback handler:
+/*
+import { SessionManager, OAuthTokenExchange } from './session-utils.js';
+
+export default async function handler(req, res) {
+  const sessionManager = new SessionManager();
+  const tokenExchange = new OAuthTokenExchange(
+    process.env.PATREON_CLIENT_ID,
+    process.env.PATREON_CLIENT_SECRET,
+    process.env.PATREON_REDIRECT_URI
+  );
+
+  // Handle the callback...
+  const { code, state, error } = req.query;
+  
+  if (error) {
+    await sessionManager.writeSession(state, {
+      status: 'error',
+      error: error
+    });
+    return res.status(400).send(generateErrorPage(error));
+  }
+
+  // Try server-side token exchange
+  if (tokenExchange.isConfigured()) {
+    try {
+      const tokens = await tokenExchange.exchangeCode(code);
+      await sessionManager.writeSession(state, {
+        status: 'completed',
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expires_in: tokens.expires_in,
+        token_type: tokens.token_type
+      });
+    } catch (error) {
+      // Fallback to code storage
+      await sessionManager.writeSession(state, {
+        status: 'completed',
+        code: code
+      });
+    }
+  }
+
+  return res.status(200).send(generateSuccessPage());
+}
+*/
