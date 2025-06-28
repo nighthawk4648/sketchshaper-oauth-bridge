@@ -40,11 +40,5 @@
         }
       ]
     }
-  ],
-
-  "env": {
-    "PATREON_CLIENT_ID": "@patreon_client_id",
-    "PATREON_CLIENT_SECRET": "@patreon_client_secret",
-    "PATREON_REDIRECT_URI": "@patreon_redirect_uri"
-  }
+  ]
 }
