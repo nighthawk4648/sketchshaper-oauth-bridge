@@ -1,4 +1,4 @@
-// api/auth-status.js - Endpoint for SketchUp extension to poll authentication status
+// api/auth-status.js - Check authentication status
 export default function handler(req, res) {
   // Enable CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
