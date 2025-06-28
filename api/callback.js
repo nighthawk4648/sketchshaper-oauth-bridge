@@ -1,4 +1,4 @@
-// api/callback.js - Improved Patreon OAuth callback handler
+// api/callback.js - Improved Patreon OAuth callback handler with better session management
 
 import fs from 'fs';
 import path from 'path';
@@ -8,10 +8,23 @@ const SESSIONS_DIR = '/tmp/auth_sessions';
 
 // Ensure the sessions directory exists
 if (!fs.existsSync(SESSIONS_DIR)) {
-  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+  try {
+    fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+    console.log('Created sessions directory:', SESSIONS_DIR);
+    
+    // Set proper permissions (readable/writable by owner)
+    fs.chmodSync(SESSIONS_DIR, 0o755);
+  } catch (error) {
+    console.error('Failed to create sessions directory:', error);
+  }
 }
 
-export default function handler(req, res) {
+// Patreon OAuth configuration for server-side token exchange
+const PATREON_CLIENT_ID = process.env.PATREON_CLIENT_ID;
+const PATREON_CLIENT_SECRET = process.env.PATREON_CLIENT_SECRET;
+const PATREON_REDIRECT_URI = process.env.PATREON_REDIRECT_URI;
+
+export default async function handler(req, res) {
   // Enable CORS for your domain
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -28,12 +41,15 @@ export default function handler(req, res) {
   try {
     const { code, state, error, error_description } = req.query;
 
-    console.log('Callback received:', { 
-      code: !!code, 
+    console.log('=== CALLBACK RECEIVED ===');
+    console.log('Parameters:', { 
+      hasCode: !!code, 
       state, 
       error,
       timestamp: new Date().toISOString()
     });
+    console.log('Sessions directory:', SESSIONS_DIR);
+    console.log('Directory exists:', fs.existsSync(SESSIONS_DIR));
 
     // Handle OAuth errors
     if (error) {
@@ -49,8 +65,16 @@ export default function handler(req, res) {
         };
         
         try {
-          fs.writeFileSync(sessionFile, JSON.stringify(sessionData));
-          console.log('Error session stored for state:', state);
+          console.log('Storing error session:', sessionFile);
+          fs.writeFileSync(sessionFile, JSON.stringify(sessionData, null, 2));
+          console.log('Error session stored successfully');
+          
+          // Verify the file was written
+          if (fs.existsSync(sessionFile)) {
+            console.log('Error session file verified to exist');
+          } else {
+            console.error('Error session file was not created!');
+          }
         } catch (writeError) {
           console.error('Failed to store error session:', writeError);
         }
@@ -65,17 +89,70 @@ export default function handler(req, res) {
       return res.status(400).send(generateErrorPage('Missing required authentication parameters'));
     }
 
-    // Store the authorization code in a session file
-    const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
-    const sessionData = {
-      status: 'completed',
-      code: code,
-      timestamp: Date.now()
-    };
+    // Try to exchange code for tokens on the server side
+    let sessionData;
+    
+    if (PATREON_CLIENT_ID && PATREON_CLIENT_SECRET && PATREON_REDIRECT_URI) {
+      console.log('Attempting server-side token exchange...');
+      try {
+        const tokenData = await exchangeCodeForTokens(code);
+        
+        if (tokenData && tokenData.access_token) {
+          // Store session with tokens
+          sessionData = {
+            status: 'completed',
+            access_token: tokenData.access_token,
+            refresh_token: tokenData.refresh_token,
+            expires_in: tokenData.expires_in,
+            token_type: tokenData.token_type,
+            timestamp: Date.now()
+          };
+          console.log('Server-side token exchange successful');
+        } else {
+          throw new Error('No access token received');
+        }
+      } catch (tokenError) {
+        console.error('Server-side token exchange failed:', tokenError);
+        // Fall back to storing the code for client-side exchange
+        sessionData = {
+          status: 'completed',
+          code: code,
+          timestamp: Date.now()
+        };
+        console.log('Falling back to client-side token exchange');
+      }
+    } else {
+      console.log('Missing environment variables, storing code for client-side exchange');
+      sessionData = {
+        status: 'completed',
+        code: code,
+        timestamp: Date.now()
+      };
+    }
 
+    // Store the session data
+    const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
+    
     try {
-      fs.writeFileSync(sessionFile, JSON.stringify(sessionData));
-      console.log('Auth session stored successfully for state:', state);
+      console.log('Storing session data:', sessionFile);
+      console.log('Session data keys:', Object.keys(sessionData));
+      
+      fs.writeFileSync(sessionFile, JSON.stringify(sessionData, null, 2));
+      console.log('Session data written successfully');
+      
+      // Verify the file was written and can be read
+      if (fs.existsSync(sessionFile)) {
+        const verifyData = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
+        console.log('Session file verified - status:', verifyData.status);
+      } else {
+        console.error('Session file was not created!');
+        return res.status(500).send(generateErrorPage('Failed to store authentication session'));
+      }
+      
+      // List all files for debugging
+      const allFiles = fs.readdirSync(SESSIONS_DIR);
+      console.log('All session files after write:', allFiles);
+      
     } catch (writeError) {
       console.error('Failed to store auth session:', writeError);
       return res.status(500).send(generateErrorPage('Failed to store authentication session'));
@@ -86,7 +163,52 @@ export default function handler(req, res) {
 
   } catch (error) {
     console.error('Callback handler error:', error);
+    console.error('Stack trace:', error.stack);
     return res.status(500).send(generateErrorPage('An unexpected error occurred. Please try again.'));
+  }
+}
+
+// Function to exchange authorization code for tokens
+async function exchangeCodeForTokens(code) {
+  try {
+    const tokenUrl = 'https://www.patreon.com/api/oauth2/token';
+    
+    const params = new URLSearchParams({
+      code: code,
+      grant_type: 'authorization_code',
+      client_id: PATREON_CLIENT_ID,
+      client_secret: PATREON_CLIENT_SECRET,
+      redirect_uri: PATREON_REDIRECT_URI
+    });
+
+    console.log('Making token exchange request...');
+    console.log('Client ID:', PATREON_CLIENT_ID ? 'Set' : 'Missing');
+    console.log('Redirect URI:', PATREON_REDIRECT_URI);
+    
+    const response = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'SketchShaper-Extension/1.0'
+      },
+      body: params.toString()
+    });
+
+    console.log('Token exchange response status:', response.status);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Token exchange failed:', response.status, errorText);
+      throw new Error(`HTTP ${response.status}: ${errorText}`);
+    }
+
+    const tokenData = await response.json();
+    console.log('Token exchange successful - received keys:', Object.keys(tokenData));
+    
+    return tokenData;
+  } catch (error) {
+    console.error('Token exchange error:', error);
+    throw error;
   }
 }
 
@@ -176,12 +298,12 @@ function generateSuccessPage() {
       </div>
       
       <script>
-        // Auto-close after 10 seconds (optional)
+        // Auto-close after 15 seconds (optional)
         setTimeout(() => {
           if (window.confirm('Close this window automatically?')) {
             window.close();
           }
-        }, 10000);
+        }, 15000);
       </script>
     </body>
     </html>
