@@ -67,9 +67,17 @@ async function internalHandler(req, res) {
 
   const { code, state, error, error_description } = req.query;
 
-  if (!process.env.PATREON_CLIENT_ID || !process.env.PATREON_CLIENT_SECRET || !process.env.PATREON_REDIRECT_URI) {
-    console.error('Missing required Patreon environment variables');
-    return res.status(500).json({ error: 'Server misconfigured - missing environment variables' });
+  const missingVars = [];
+  if (!process.env.PATREON_CLIENT_ID) missingVars.push('PATREON_CLIENT_ID');
+  if (!process.env.PATREON_CLIENT_SECRET) missingVars.push('PATREON_CLIENT_SECRET');
+  if (!process.env.PATREON_REDIRECT_URI) missingVars.push('PATREON_REDIRECT_URI');
+
+  if (missingVars.length > 0) {
+    console.error('Missing required Patreon environment variables:', missingVars);
+    return res.status(500).json({
+      error: 'Server misconfigured - missing environment variables',
+      missing: missingVars
+    });
   }
 
   if (error) {
@@ -102,10 +110,14 @@ async function internalHandler(req, res) {
       if (verify) {
         stored = true;
         storageMethod = 'redis';
+      } else {
+        console.warn('Redis verification failed after setex');
       }
     } catch (err) {
-      console.error('Redis error:', err.message);
+      console.error('Redis error during session storage:', err.message);
     }
+  } else {
+    console.warn('Redis not initialized or connection failed');
   }
 
   if (!stored) {
@@ -119,7 +131,7 @@ async function internalHandler(req, res) {
   }
 
   if (!stored) {
-    return res.status(500).send(getErrorHTML('Failed to store session'));
+    return res.status(500).send(getErrorHTML(`Failed to store session. Redis available: ${!!redis}, Redis test: ${redisTestResult}, Redis error: ${redisError}`));
   }
 
   return res.status(200).send(getSuccessHTML({
