@@ -1,5 +1,15 @@
-// api/auth-status.js - Fixed version with better logging and error handling
+// api/auth-status.js - Redis version
 import fetch from 'node-fetch';
+import Redis from 'ioredis';
+
+// Initialize Redis client
+let redis;
+try {
+  redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+  console.log('Redis client initialized');
+} catch (error) {
+  console.error('Redis initialization failed:', error);
+}
 
 export default async function handler(req, res) {
   // Enable CORS
@@ -20,24 +30,49 @@ export default async function handler(req, res) {
     
     console.log('=== AUTH STATUS CHECK ===');
     console.log('Requested state:', state);
-    console.log('Available sessions:', global.authSessions ? Array.from(global.authSessions.keys()) : 'No global.authSessions');
-    console.log('Total sessions:', global.authSessions ? global.authSessions.size : 0);
+    console.log('Redis available:', !!redis);
     
     if (!state) {
       console.log('ERROR: No state parameter provided');
       return res.status(400).json({ error: 'State parameter required' });
     }
 
-    // Initialize global storage if it doesn't exist
-    if (!global.authSessions) {
-      console.log('WARNING: global.authSessions not found, initializing...');
-      global.authSessions = new Map();
+    let session = null;
+    let storageMethod = 'none';
+
+    // Try Redis first
+    if (redis) {
+      try {
+        const redisData = await redis.get(`auth:${state}`);
+        if (redisData) {
+          session = JSON.parse(redisData);
+          storageMethod = 'redis';
+          console.log('Session found in Redis');
+        } else {
+          console.log('Session not found in Redis');
+        }
+      } catch (redisError) {
+        console.error('Redis retrieval error:', redisError);
+      }
     }
 
-    // Get session from storage
-    const session = global.authSessions.get(state);
-    
+    // Fallback to global storage
+    if (!session) {
+      if (!global.authSessions) {
+        console.log('WARNING: global.authSessions not found, initializing...');
+        global.authSessions = new Map();
+      }
+
+      session = global.authSessions.get(state);
+      if (session) {
+        storageMethod = 'global';
+        console.log('Session found in global storage');
+      }
+    }
+
     console.log('Session lookup result:', session ? 'FOUND' : 'NOT FOUND');
+    console.log('Storage method:', storageMethod);
+    
     if (session) {
       console.log('Session details:', {
         status: session.status,
@@ -54,17 +89,29 @@ export default async function handler(req, res) {
         message: 'Authentication session not found or still pending',
         debug: {
           requestedState: state,
-          availableStates: Array.from(global.authSessions.keys()),
+          storageMethod: storageMethod,
           timestamp: new Date().toISOString()
         }
       });
     }
 
-    // Check if session is expired (10 minutes instead of 5)
+    // Check if session is expired (10 minutes)
     const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
     if (session.timestamp < tenMinutesAgo) {
       console.log('Session expired, deleting...');
-      global.authSessions.delete(state);
+      
+      // Delete from both storage methods
+      if (redis) {
+        try {
+          await redis.del(`auth:${state}`);
+        } catch (error) {
+          console.error('Redis deletion error:', error);
+        }
+      }
+      if (global.authSessions) {
+        global.authSessions.delete(state);
+      }
+      
       return res.status(404).json({ 
         status: 'expired',
         message: 'Authentication session expired' 
@@ -104,8 +151,17 @@ export default async function handler(req, res) {
           session.expires_in = tokenData.expires_in;
           session.token_type = tokenData.token_type;
           
-          // Save updated session
-          global.authSessions.set(state, session);
+          // Save updated session to both storage methods
+          if (redis && storageMethod === 'redis') {
+            try {
+              await redis.setex(`auth:${state}`, 600, JSON.stringify(session));
+            } catch (error) {
+              console.error('Redis update error:', error);
+            }
+          }
+          if (global.authSessions) {
+            global.authSessions.set(state, session);
+          }
           
           console.log('Session updated with tokens');
         } else {
@@ -114,20 +170,43 @@ export default async function handler(req, res) {
           
           session.status = 'error';
           session.error = `Failed to exchange authorization code: ${tokenResponse.status}`;
-          global.authSessions.set(state, session);
+          
+          // Update error status in storage
+          if (redis && storageMethod === 'redis') {
+            try {
+              await redis.setex(`auth:${state}`, 600, JSON.stringify(session));
+            } catch (error) {
+              console.error('Redis error update failed:', error);
+            }
+          }
+          if (global.authSessions) {
+            global.authSessions.set(state, session);
+          }
         }
       } catch (error) {
         console.error('Token exchange error:', error);
         session.status = 'error';
         session.error = 'Token exchange failed: ' + error.message;
-        global.authSessions.set(state, session);
+        
+        // Update error status in storage
+        if (redis && storageMethod === 'redis') {
+          try {
+            await redis.setex(`auth:${state}`, 600, JSON.stringify(session));
+          } catch (redisError) {
+            console.error('Redis error update failed:', redisError);
+          }
+        }
+        if (global.authSessions) {
+          global.authSessions.set(state, session);
+        }
       }
     }
 
     // Prepare response
     const response = {
       status: session.status,
-      timestamp: session.timestamp
+      timestamp: session.timestamp,
+      storageMethod: storageMethod
     };
 
     if (session.status === 'completed' && session.access_token) {
@@ -139,13 +218,32 @@ export default async function handler(req, res) {
       response.state = state;
       
       // Clean up the session after successful retrieval
-      global.authSessions.delete(state);
+      if (redis && storageMethod === 'redis') {
+        try {
+          await redis.del(`auth:${state}`);
+        } catch (error) {
+          console.error('Redis cleanup error:', error);
+        }
+      }
+      if (global.authSessions) {
+        global.authSessions.delete(state);
+      }
       console.log('Session cleaned up after successful retrieval');
     } else if (session.status === 'error') {
       console.log('Returning error session');
       response.error = session.error;
+      
       // Clean up error sessions too
-      global.authSessions.delete(state);
+      if (redis && storageMethod === 'redis') {
+        try {
+          await redis.del(`auth:${state}`);
+        } catch (error) {
+          console.error('Redis cleanup error:', error);
+        }
+      }
+      if (global.authSessions) {
+        global.authSessions.delete(state);
+      }
     } else if (session.status === 'completed' && session.code) {
       console.log('Returning session with code (no tokens yet)');
       response.code = session.code;
