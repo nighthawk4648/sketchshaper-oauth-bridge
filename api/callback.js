@@ -1,153 +1,169 @@
-// api/callback.js
-import Redis from 'ioredis';
+// api/callback.js - Handles Patreon OAuth callback
 
-let redis;
-let redisError = null;
-
-try {
-  const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
-  console.log('Attempting Redis connection to:', redisUrl.replace(/\/\/.*@/, '//***:***@'));
-
-  redis = new Redis(redisUrl, {
-    connectTimeout: 10000,
-    lazyConnect: true,
-    maxRetriesPerRequest: 3,
-    retryDelayOnFailover: 100,
-    enableOfflineQueue: false,
-  });
-
-  redis.on('connect', () => {
-    console.log('Redis connected successfully');
-    redisError = null;
-  });
-
-  redis.on('error', (error) => {
-    console.error('Redis error:', error.message);
-    redisError = error.message;
-  });
-
-  redis.on('close', () => {
-    console.log('Redis connection closed');
-  });
-} catch (error) {
-  console.error('Redis initialization failed:', error.message);
-  redisError = error.message;
-  redis = null;
+// Initialize global storage for auth sessions (in production, use Redis or database)
+if (!global.authSessions) {
+  global.authSessions = new Map();
 }
 
-export default async function handler(req, res) {
-  try {
-    await internalHandler(req, res);
-  } catch (e) {
-    console.error('=== TOP-LEVEL FUNCTION CRASH ===');
-    console.error(e.stack || e.message);
-    return res.status(500).json({ error: 'Top-level crash: ' + e.message });
-  }
-}
-
-async function internalHandler(req, res) {
-  console.log('=== CALLBACK HANDLER START ===');
-  console.log('Method:', req.method);
-  console.log('Query:', req.query);
-  console.log('Headers:', JSON.stringify(req.headers, null, 2));
-
+export default function handler(req, res) {
+  // Enable CORS for your domain
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') {
-    console.log('OPTIONS request - returning 200');
     return res.status(200).end();
   }
 
   if (req.method !== 'GET') {
-    console.log('Invalid method:', req.method);
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { code, state, error, error_description } = req.query;
+  try {
+    const { code, state, error, error_description } = req.query;
 
-  const missingVars = [];
-  if (!process.env.PATREON_CLIENT_ID) missingVars.push('PATREON_CLIENT_ID');
-  if (!process.env.PATREON_CLIENT_SECRET) missingVars.push('PATREON_CLIENT_SECRET');
-  if (!process.env.PATREON_REDIRECT_URI) missingVars.push('PATREON_REDIRECT_URI');
+    console.log('Callback received:', { code: !!code, state, error });
 
-  if (missingVars.length > 0) {
-    console.error('Missing required Patreon environment variables:', missingVars);
-    return res.status(500).json({
-      error: 'Server misconfigured - missing environment variables',
-      missing: missingVars
-    });
-  }
-
-  if (error) {
-    console.error('OAuth error received:', error, error_description);
-    return res.status(400).send(getErrorHTML(error_description || error));
-  }
-
-  if (!code || typeof code !== 'string' || code.length < 10 || !state || typeof state !== 'string' || state.length < 10) {
-    return res.status(400).send(getErrorHTML('Invalid or missing code/state parameters'));
-  }
-
-  const session = {
-    status: 'completed',
-    code,
-    timestamp: Date.now(),
-    nodeId: process.env.VERCEL_REGION || 'unknown',
-    userAgent: req.headers['user-agent'] || 'unknown'
-  };
-
-  let stored = false;
-  let storageMethod = 'none';
-  let redisTestResult = null;
-
-  if (redis) {
-    try {
-      await redis.ping();
-      redisTestResult = 'success';
-      await redis.setex(`auth:${state}`, 600, JSON.stringify(session));
-      const verify = await redis.get(`auth:${state}`);
-      if (verify) {
-        stored = true;
-        storageMethod = 'redis';
-      } else {
-        console.warn('Redis verification failed after setex');
+    // Handle OAuth errors
+    if (error) {
+      console.error('OAuth error:', error, error_description);
+      
+      // Store error in session
+      if (state) {
+        global.authSessions.set(state, {
+          status: 'error',
+          error: error_description || error,
+          timestamp: Date.now()
+        });
       }
-    } catch (err) {
-      console.error('Redis error during session storage:', err.message);
+
+      return res.status(400).send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Authentication Error</title>
+          <style>
+            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+            .error { color: #e53e3e; }
+          </style>
+        </head>
+        <body>
+          <h1 class="error">Authentication Failed</h1>
+          <p>${error_description || error}</p>
+          <p>You can close this window and try again.</p>
+        </body>
+        </html>
+      `);
     }
-  } else {
-    console.warn('Redis not initialized or connection failed');
-  }
 
-  if (!stored) {
-    console.log('Falling back to global storage');
-    if (!global.authSessions) global.authSessions = new Map();
-    global.authSessions.set(state, session);
-    if (global.authSessions.get(state)) {
-      stored = true;
-      storageMethod = 'global';
+    // Validate required parameters
+    if (!code || !state) {
+      console.error('Missing required parameters:', { code: !!code, state: !!state });
+      return res.status(400).send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Authentication Error</title>
+          <style>
+            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+            .error { color: #e53e3e; }
+          </style>
+        </head>
+        <body>
+          <h1 class="error">Invalid Request</h1>
+          <p>Missing required authentication parameters.</p>
+          <p>You can close this window and try again.</p>
+        </body>
+        </html>
+      `);
     }
+
+    // Store the authorization code for the SketchUp extension to retrieve
+    global.authSessions.set(state, {
+      status: 'completed',
+      code: code,
+      timestamp: Date.now()
+    });
+
+    console.log('Auth session stored for state:', state);
+
+    // Return success page
+    return res.status(200).send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Authentication Successful</title>
+        <style>
+          body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            text-align: center; 
+            padding: 50px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          }
+          .container {
+            background: white;
+            color: #2d3748;
+            padding: 40px;
+            border-radius: 16px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            max-width: 400px;
+          }
+          .success { color: #38a169; }
+          .logo {
+            margin-bottom: 20px;
+          }
+          .checkmark {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            background: #38a169;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 20px;
+            font-size: 24px;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="checkmark">✓</div>
+          <h1 class="success">Authentication Successful!</h1>
+          <p>You have successfully authenticated with Patreon.</p>
+          <p><strong>You can now close this window and return to SketchUp.</strong></p>
+          <p style="font-size: 14px; color: #718096; margin-top: 30px;">
+            Your SketchShaper Pro extension will automatically detect the successful authentication.
+          </p>
+        </div>
+      </body>
+      </html>
+    `);
+
+  } catch (error) {
+    console.error('Callback handler error:', error);
+    return res.status(500).send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Server Error</title>
+        <style>
+          body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+          .error { color: #e53e3e; }
+        </style>
+      </head>
+      <body>
+        <h1 class="error">Server Error</h1>
+        <p>An unexpected error occurred. Please try again.</p>
+        <p>You can close this window and try again.</p>
+      </body>
+      </html>
+    `);
   }
-
-  if (!stored) {
-    return res.status(500).send(getErrorHTML(`Failed to store session. Redis available: ${!!redis}, Redis test: ${redisTestResult}, Redis error: ${redisError}`));
-  }
-
-  return res.status(200).send(getSuccessHTML({
-    state,
-    timestamp: new Date(session.timestamp).toISOString(),
-    nodeId: session.nodeId,
-    storageMethod,
-    redisAvailable: !!redis,
-    redisTestResult
-  }));
-}
-
-function getErrorHTML(message) {
-  return `<!DOCTYPE html><html><head><title>Authentication Error</title></head><body><h1>Error</h1><p>${message}</p></body></html>`;
-}
-
-function getSuccessHTML(debugInfo = {}) {
-  return `<!DOCTYPE html><html><head><title>Success</title></head><body><h1>Success</h1><pre>${JSON.stringify(debugInfo, null, 2)}</pre></body></html>`;
 }
