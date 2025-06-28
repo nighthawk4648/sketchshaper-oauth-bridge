@@ -42,5 +42,7 @@
     }
   ],
   "buildCommand": null,
-  "devCommand": null
+  "devCommand": null,
+  "cleanUrls": true,
+  "trailingSlash": false
 }
