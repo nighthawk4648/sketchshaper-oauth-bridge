@@ -1,9 +1,9 @@
-// api/auth-status.js - Improved with comprehensive error handling
+// api/auth-status.js - Improved with comprehensive error handling and debugging
 import fs from 'fs';
 import path from 'path';
 
-// Use a temporary directory for session storage
-const SESSIONS_DIR = '/tmp/auth_sessions';
+// Use a more reliable directory for session storage
+const SESSIONS_DIR = path.join(process.cwd(), 'tmp', 'auth_sessions');
 
 // Patreon OAuth configuration
 const PATREON_CLIENT_ID = process.env.PATREON_CLIENT_ID;
@@ -88,6 +88,38 @@ function safeListDir(dirPath) {
   }
 }
 
+// Test file system permissions
+function testFileSystemAccess() {
+  console.log('=== FILE SYSTEM ACCESS TEST ===');
+  
+  try {
+    // Test /tmp access
+    console.log('Testing /tmp access...');
+    const tmpTestFile = '/tmp/test_write.txt';
+    fs.writeFileSync(tmpTestFile, 'test');
+    fs.unlinkSync(tmpTestFile);
+    console.log('/tmp write test: SUCCESS');
+  } catch (error) {
+    console.error('/tmp write test FAILED:', error.message);
+  }
+  
+  try {
+    // Test current working directory access
+    console.log('Testing current directory access...');
+    const cwdTestFile = path.join(process.cwd(), 'test_write.txt');
+    fs.writeFileSync(cwdTestFile, 'test');
+    fs.unlinkSync(cwdTestFile);
+    console.log('CWD write test: SUCCESS');
+  } catch (error) {
+    console.error('CWD write test FAILED:', error.message);
+  }
+  
+  console.log('Process CWD:', process.cwd());
+  console.log('Process user ID:', process.getuid ? process.getuid() : 'N/A');
+  console.log('Process groups:', process.getgroups ? process.getgroups() : 'N/A');
+  console.log('================================');
+}
+
 export default async function handler(req, res) {
   console.log('=== AUTH STATUS REQUEST START ===');
   console.log('Method:', req.method);
@@ -96,6 +128,9 @@ export default async function handler(req, res) {
   console.log('Headers:', Object.keys(req.headers));
 
   try {
+    // Run file system test first
+    testFileSystemAccess();
+    
     // Enable CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -136,8 +171,8 @@ export default async function handler(req, res) {
       });
     }
 
-    // Validate state parameter format
-    if (typeof state !== 'string' || state.length < 10 || !/^[a-f0-9]+$/.test(state)) {
+    // Simplified state parameter validation
+    if (typeof state !== 'string' || state.length < 8) {
       console.log('Invalid state parameter format:', state);
       return res.status(400).json({ 
         error: 'Invalid state parameter format',
@@ -146,18 +181,48 @@ export default async function handler(req, res) {
       });
     }
 
+    console.log('=== DIRECTORY DEBUG ===');
+    console.log('Process CWD:', process.cwd());
+    console.log('Sessions dir path:', SESSIONS_DIR);
+    console.log('Directory exists before creation:', safeDirExists(SESSIONS_DIR));
+    
     // Ensure sessions directory exists
-    console.log('Checking sessions directory...');
+    console.log('Creating sessions directory...');
     const dirCreated = safeCreateDir(SESSIONS_DIR);
+    console.log('Directory creation result:', dirCreated);
+    console.log('Directory exists after creation:', safeDirExists(SESSIONS_DIR));
+    
     if (!dirCreated) {
       console.error('Failed to create or access sessions directory');
       return res.status(500).json({ 
         error: 'Server storage error - cannot access sessions directory',
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        debug: {
+          sessionsDir: SESSIONS_DIR,
+          cwd: process.cwd(),
+          dirExists: safeDirExists(SESSIONS_DIR)
+        }
       });
     }
 
-    console.log('Directory exists:', safeDirExists(SESSIONS_DIR));
+    // Try to test write permissions to the sessions directory
+    try {
+      const testFile = path.join(SESSIONS_DIR, 'write_test.txt');
+      fs.writeFileSync(testFile, 'test');
+      fs.unlinkSync(testFile);
+      console.log('Sessions directory write test: SUCCESS');
+    } catch (writeError) {
+      console.error('Sessions directory write test FAILED:', writeError.message);
+      return res.status(500).json({ 
+        error: 'Cannot write to sessions directory',
+        timestamp: Date.now(),
+        debug: {
+          writeError: writeError.message,
+          sessionsDir: SESSIONS_DIR
+        }
+      });
+    }
+    console.log('=======================');
     
     // List all files in sessions directory for debugging
     const files = safeListDir(SESSIONS_DIR);
@@ -311,7 +376,9 @@ export default async function handler(req, res) {
       debug: {
         errorName: error.name,
         nodeVersion: process.version,
-        platform: process.platform
+        platform: process.platform,
+        cwd: process.cwd(),
+        sessionsDir: SESSIONS_DIR
       }
     });
   }
