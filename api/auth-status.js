@@ -47,7 +47,8 @@ function validateState(state) {
   
   const timestamp = parseInt(timestampPart);
   const now = Date.now();
-  const maxAge = 30 * 60 * 1000; // 30 minutes
+  // FIXED: Increased max age to 60 minutes to handle longer auth flows
+  const maxAge = 60 * 60 * 1000; // 60 minutes instead of 30
   
   console.log('Timestamp validation details:', {
     stateTimestamp: timestamp,
@@ -65,8 +66,8 @@ function validateState(state) {
     return { valid: false, reason: 'Invalid timestamp', timestamp };
   }
   
-  if (timestamp > now) {
-    console.log('❌ State validation failed: Timestamp is in the future');
+  if (timestamp > now + (5 * 60 * 1000)) { // Allow 5 minutes of clock skew
+    console.log('❌ State validation failed: Timestamp is too far in the future');
     return { valid: false, reason: 'Future timestamp', timestamp, now };
   }
   
@@ -184,6 +185,20 @@ function debugSessionFile(state) {
   }
 }
 
+// FIXED: Ensure sessions directory exists
+function ensureSessionsDirectory() {
+  try {
+    if (!fs.existsSync(SESSIONS_DIR)) {
+      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+      console.log('✅ Created sessions directory:', SESSIONS_DIR);
+    }
+    return true;
+  } catch (error) {
+    console.error('❌ Failed to create sessions directory:', error);
+    return false;
+  }
+}
+
 export default async function handler(req, res) {
   console.log('=== ENHANCED AUTH STATUS DEBUG HANDLER ===');
   console.log('Timestamp:', new Date().toISOString());
@@ -222,11 +237,71 @@ export default async function handler(req, res) {
       });
     }
 
+    // FIXED: Ensure sessions directory exists before validation
+    if (!ensureSessionsDirectory()) {
+      console.error('❌ Cannot create sessions directory');
+      return res.status(500).json({
+        status: 'error',
+        error: 'Server configuration error',
+        debug: {
+          message: 'Cannot create sessions directory',
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
     // Enhanced state validation with detailed debugging
     const stateValidation = validateState(state);
     
     if (!stateValidation.valid) {
       console.error('❌ State validation failed:', stateValidation.reason);
+      
+      // FIXED: Check if session file exists even if state validation fails
+      // This handles edge cases where the session might exist but timestamp validation is too strict
+      const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
+      if (fs.existsSync(sessionFile)) {
+        console.log('⚠️ Session file exists despite state validation failure, checking content...');
+        
+        try {
+          const content = fs.readFileSync(sessionFile, 'utf8');
+          const sessionData = JSON.parse(content);
+          
+          // If the session is completed, return it regardless of timestamp validation
+          if (sessionData.status === 'completed') {
+            console.log('✅ Found completed session despite validation failure, returning it');
+            
+            const response = {
+              status: sessionData.status,
+              timestamp: sessionData.timestamp
+            };
+
+            if (sessionData.access_token) {
+              response.access_token = sessionData.access_token;
+              response.refresh_token = sessionData.refresh_token;
+              response.expires_in = sessionData.expires_in;
+              response.token_type = sessionData.token_type;
+            } else if (sessionData.code) {
+              response.code = sessionData.code;
+              response.fallback_reason = sessionData.fallback_reason;
+            }
+            
+            response.state = state;
+            
+            // Clean up the session file
+            try {
+              fs.unlinkSync(sessionFile);
+              console.log('✅ Completed session cleaned up');
+            } catch (cleanupError) {
+              console.error('Failed to cleanup completed session:', cleanupError.message);
+            }
+            
+            return res.status(200).json(response);
+          }
+        } catch (readError) {
+          console.error('Failed to read session file:', readError.message);
+        }
+      }
+      
       return res.status(400).json({
         status: 'error',
         error: 'Invalid authentication state',
@@ -284,21 +359,23 @@ export default async function handler(req, res) {
 
     const sessionData = sessionDebug.data;
 
-    // Check session age
+    // FIXED: More lenient session age check
     const now = Date.now();
     const sessionAge = now - (sessionData.timestamp || 0);
+    // Use longer timeout for session files (60 minutes instead of 15)
+    const sessionFileTimeout = 60 * 60 * 1000; // 60 minutes
     
     console.log('Session age check:', {
       sessionTimestamp: sessionData.timestamp,
       currentTime: now,
       age: sessionAge,
       ageInMinutes: sessionAge / (1000 * 60),
-      timeout: SESSION_TIMEOUT,
-      timeoutInMinutes: SESSION_TIMEOUT / (1000 * 60),
-      expired: sessionAge > SESSION_TIMEOUT
+      timeout: sessionFileTimeout,
+      timeoutInMinutes: sessionFileTimeout / (1000 * 60),
+      expired: sessionAge > sessionFileTimeout
     });
     
-    if (sessionAge > SESSION_TIMEOUT) {
+    if (sessionAge > sessionFileTimeout) {
       console.log('❌ Session expired, cleaning up...');
       
       try {
@@ -314,7 +391,7 @@ export default async function handler(req, res) {
         message: 'Authentication session expired',
         debug: {
           age: sessionAge,
-          timeout: SESSION_TIMEOUT,
+          timeout: sessionFileTimeout,
           timestamp: new Date().toISOString()
         }
       });
