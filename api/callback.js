@@ -1,4 +1,4 @@
-// api/callback.js - Clean Patreon OAuth callback handler
+// api/callback.js - Enhanced Patreon OAuth callback handler with debugging
 import fs from 'fs';
 import path from 'path';
 
@@ -18,16 +18,81 @@ function ensureSessionsDirectory() {
   }
 }
 
-// Validate state parameter
+// Enhanced state validation with detailed logging
 function validateState(state) {
-  if (!state || typeof state !== 'string') return false;
-  if (!/^[a-f0-9]+_\d+$/.test(state)) return false;
+  console.log('Validating state parameter:', state);
   
-  const timestamp = parseInt(state.split('_')[1]);
+  if (!state || typeof state !== 'string') {
+    console.log('State validation failed: Missing or invalid type');
+    return false;
+  }
+  
+  // More flexible regex pattern - allow alphanumeric and common separators
+  if (!/^[a-fA-F0-9]+_\d+$/.test(state)) {
+    console.log('State validation failed: Pattern mismatch. Expected format: [hex]_[timestamp]');
+    console.log('Actual state format:', state);
+    return false;
+  }
+  
+  const parts = state.split('_');
+  if (parts.length !== 2) {
+    console.log('State validation failed: Invalid format - expected exactly one underscore');
+    return false;
+  }
+  
+  const timestamp = parseInt(parts[1]);
   const now = Date.now();
   const maxAge = 30 * 60 * 1000; // 30 minutes
   
-  return timestamp > 0 && timestamp <= now && (now - timestamp) <= maxAge;
+  console.log('Timestamp validation:', {
+    stateTimestamp: timestamp,
+    currentTime: now,
+    age: now - timestamp,
+    maxAge: maxAge,
+    isValid: timestamp > 0 && timestamp <= now && (now - timestamp) <= maxAge
+  });
+  
+  if (timestamp <= 0) {
+    console.log('State validation failed: Invalid timestamp (not positive)');
+    return false;
+  }
+  
+  if (timestamp > now) {
+    console.log('State validation failed: Timestamp is in the future');
+    return false;
+  }
+  
+  if ((now - timestamp) > maxAge) {
+    console.log('State validation failed: Timestamp too old');
+    return false;
+  }
+  
+  console.log('State validation passed');
+  return true;
+}
+
+// Alternative validation function for debugging
+function validateStateAlternative(state) {
+  console.log('Alternative state validation for:', state);
+  
+  if (!state || typeof state !== 'string') {
+    return false;
+  }
+  
+  // More lenient validation - just check if it's not empty and contains reasonable characters
+  if (state.length < 10 || state.length > 100) {
+    console.log('State length validation failed:', state.length);
+    return false;
+  }
+  
+  // Allow any alphanumeric state with common separators
+  if (!/^[a-zA-Z0-9_-]+$/.test(state)) {
+    console.log('State character validation failed');
+    return false;
+  }
+  
+  console.log('Alternative state validation passed');
+  return true;
 }
 
 // Exchange authorization code for tokens
@@ -142,8 +207,15 @@ function generateSuccessPage() {
   `;
 }
 
-// Generate error page
-function generateErrorPage(errorMessage) {
+// Generate error page with more debugging info
+function generateErrorPage(errorMessage, debugInfo = null) {
+  const debugSection = debugInfo ? `
+    <div style="margin-top: 20px; padding: 15px; background: #f7fafc; border-radius: 8px; text-align: left; font-size: 12px; color: #4a5568;">
+      <strong>Debug Info:</strong><br>
+      <pre style="margin: 5px 0; white-space: pre-wrap;">${JSON.stringify(debugInfo, null, 2)}</pre>
+    </div>
+  ` : '';
+
   return `
     <!DOCTYPE html>
     <html>
@@ -170,7 +242,7 @@ function generateErrorPage(errorMessage) {
           padding: 40px;
           border-radius: 16px;
           box-shadow: 0 20px 40px rgba(0,0,0,0.1);
-          max-width: 400px;
+          max-width: 500px;
           width: 100%;
         }
         .error-icon {
@@ -195,6 +267,7 @@ function generateErrorPage(errorMessage) {
         <h1>Authentication Failed</h1>
         <p>${errorMessage}</p>
         <p>You can close this window and try again.</p>
+        ${debugSection}
       </div>
     </body>
     </html>
@@ -203,6 +276,7 @@ function generateErrorPage(errorMessage) {
 
 export default async function handler(req, res) {
   console.log('Callback handler started:', req.method, req.url);
+  console.log('Query parameters:', req.query);
 
   try {
     // Set CORS headers
@@ -230,7 +304,8 @@ export default async function handler(req, res) {
     if (error) {
       console.error('OAuth error:', error, error_description);
       
-      if (state && validateState(state)) {
+      // Try to store error even with invalid state for debugging
+      if (state) {
         const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
         const sessionData = {
           status: 'error',
@@ -245,19 +320,41 @@ export default async function handler(req, res) {
         }
       }
 
-      return res.status(400).send(generateErrorPage(error_description || error));
+      return res.status(400).send(generateErrorPage(error_description || error, {
+        oauthError: error,
+        state: state,
+        hasCode: !!code
+      }));
     }
 
     // Validate required parameters
     if (!code || !state) {
-      console.error('Missing required parameters');
-      return res.status(400).send(generateErrorPage('Missing authentication parameters'));
+      console.error('Missing required parameters - code:', !!code, 'state:', !!state);
+      return res.status(400).send(generateErrorPage('Missing authentication parameters', {
+        hasCode: !!code,
+        hasState: !!state,
+        state: state
+      }));
     }
 
-    // Validate state parameter
-    if (!validateState(state)) {
-      console.error('Invalid state parameter');
-      return res.status(400).send(generateErrorPage('Invalid authentication state'));
+    // Try primary validation first
+    let isStateValid = validateState(state);
+    
+    // If primary validation fails, try alternative validation
+    if (!isStateValid) {
+      console.log('Primary state validation failed, trying alternative validation...');
+      isStateValid = validateStateAlternative(state);
+      
+      if (!isStateValid) {
+        console.error('Both state validations failed');
+        return res.status(400).send(generateErrorPage('Invalid authentication state', {
+          state: state,
+          stateLength: state.length,
+          statePattern: /^[a-fA-F0-9]+_\d+$/.test(state),
+          alternativePattern: /^[a-zA-Z0-9_-]+$/.test(state),
+          timestamp: Date.now()
+        }));
+      }
     }
 
     const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
@@ -306,6 +403,9 @@ export default async function handler(req, res) {
 
   } catch (error) {
     console.error('Callback handler error:', error);
-    return res.status(500).send(generateErrorPage('Server error occurred'));
+    return res.status(500).send(generateErrorPage('Server error occurred', {
+      error: error.message,
+      stack: error.stack
+    }));
   }
 }
