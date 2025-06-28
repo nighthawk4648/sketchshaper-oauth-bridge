@@ -1,4 +1,4 @@
-// api/auth-status.js - Updated to exchange code for tokens
+// api/auth-status.js - Fixed version with better logging and error handling
 import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
@@ -17,24 +17,54 @@ export default async function handler(req, res) {
 
   try {
     const { state } = req.query;
+    
+    console.log('=== AUTH STATUS CHECK ===');
+    console.log('Requested state:', state);
+    console.log('Available sessions:', global.authSessions ? Array.from(global.authSessions.keys()) : 'No global.authSessions');
+    console.log('Total sessions:', global.authSessions ? global.authSessions.size : 0);
+    
     if (!state) {
+      console.log('ERROR: No state parameter provided');
       return res.status(400).json({ error: 'State parameter required' });
     }
 
-    // Get session from your storage (Redis/Database/File)
-    const session = await getSession(state); // Implement this based on your storage
+    // Initialize global storage if it doesn't exist
+    if (!global.authSessions) {
+      console.log('WARNING: global.authSessions not found, initializing...');
+      global.authSessions = new Map();
+    }
+
+    // Get session from storage
+    const session = global.authSessions.get(state);
+    
+    console.log('Session lookup result:', session ? 'FOUND' : 'NOT FOUND');
+    if (session) {
+      console.log('Session details:', {
+        status: session.status,
+        hasCode: !!session.code,
+        hasAccessToken: !!session.access_token,
+        timestamp: new Date(session.timestamp).toISOString()
+      });
+    }
     
     if (!session) {
+      console.log('Session not found - returning pending status');
       return res.status(404).json({ 
         status: 'pending',
-        message: 'Authentication session not found or still pending' 
+        message: 'Authentication session not found or still pending',
+        debug: {
+          requestedState: state,
+          availableStates: Array.from(global.authSessions.keys()),
+          timestamp: new Date().toISOString()
+        }
       });
     }
 
-    // Check if session is expired (5 minutes)
-    const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
-    if (session.timestamp < fiveMinutesAgo) {
-      await deleteSession(state); // Implement this
+    // Check if session is expired (10 minutes instead of 5)
+    const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
+    if (session.timestamp < tenMinutesAgo) {
+      console.log('Session expired, deleting...');
+      global.authSessions.delete(state);
       return res.status(404).json({ 
         status: 'expired',
         message: 'Authentication session expired' 
@@ -43,7 +73,7 @@ export default async function handler(req, res) {
 
     // If we have a code but haven't exchanged it for tokens yet
     if (session.status === 'completed' && session.code && !session.access_token) {
-      console.log('Exchanging code for tokens...');
+      console.log('Found authorization code, exchanging for tokens...');
       
       try {
         // Exchange authorization code for access token
@@ -61,8 +91,12 @@ export default async function handler(req, res) {
           }),
         });
 
+        console.log('Token exchange response status:', tokenResponse.status);
+
         if (tokenResponse.ok) {
           const tokenData = await tokenResponse.json();
+          
+          console.log('Token exchange successful, updating session...');
           
           // Update session with tokens
           session.access_token = tokenData.access_token;
@@ -71,32 +105,33 @@ export default async function handler(req, res) {
           session.token_type = tokenData.token_type;
           
           // Save updated session
-          await saveSession(state, session); // Implement this
+          global.authSessions.set(state, session);
           
-          console.log('Token exchange successful');
+          console.log('Session updated with tokens');
         } else {
           const errorText = await tokenResponse.text();
-          console.error('Token exchange failed:', errorText);
+          console.error('Token exchange failed:', tokenResponse.status, errorText);
           
           session.status = 'error';
-          session.error = 'Failed to exchange authorization code for access token';
-          await saveSession(state, session);
+          session.error = `Failed to exchange authorization code: ${tokenResponse.status}`;
+          global.authSessions.set(state, session);
         }
       } catch (error) {
         console.error('Token exchange error:', error);
         session.status = 'error';
-        session.error = 'Token exchange failed';
-        await saveSession(state, session);
+        session.error = 'Token exchange failed: ' + error.message;
+        global.authSessions.set(state, session);
       }
     }
 
-    // Return the session data
+    // Prepare response
     const response = {
       status: session.status,
       timestamp: session.timestamp
     };
 
     if (session.status === 'completed' && session.access_token) {
+      console.log('Returning completed session with tokens');
       response.access_token = session.access_token;
       response.refresh_token = session.refresh_token;
       response.expires_in = session.expires_in;
@@ -104,60 +139,26 @@ export default async function handler(req, res) {
       response.state = state;
       
       // Clean up the session after successful retrieval
-      await deleteSession(state);
+      global.authSessions.delete(state);
+      console.log('Session cleaned up after successful retrieval');
     } else if (session.status === 'error') {
+      console.log('Returning error session');
       response.error = session.error;
       // Clean up error sessions too
-      await deleteSession(state);
+      global.authSessions.delete(state);
+    } else if (session.status === 'completed' && session.code) {
+      console.log('Returning session with code (no tokens yet)');
+      response.code = session.code;
     }
 
-    console.log('Auth status checked for state:', state, 'Status:', session.status);
+    console.log('Final response status:', response.status);
     return res.status(200).json(response);
 
   } catch (error) {
     console.error('Auth status check error:', error);
     return res.status(500).json({ 
       status: 'error',
-      error: 'Internal server error' 
+      error: 'Internal server error: ' + error.message
     });
   }
-}
-
-// Implement these functions based on your storage solution:
-
-async function getSession(state) {
-  // For Redis:
-  // const sessionData = await redis.get(`auth_session:${state}`);
-  // return sessionData ? JSON.parse(sessionData) : null;
-  
-  // For Database:
-  // const result = await pool.query('SELECT * FROM auth_sessions WHERE state = $1', [state]);
-  // return result.rows[0] || null;
-  
-  // For global (temporary):
-  return global.authSessions?.get(state) || null;
-}
-
-async function saveSession(state, session) {
-  // For Redis:
-  // await redis.setex(`auth_session:${state}`, 300, JSON.stringify(session));
-  
-  // For Database:
-  // await pool.query('UPDATE auth_sessions SET status = $1, access_token = $2, refresh_token = $3, expires_in = $4 WHERE state = $5',
-  //   [session.status, session.access_token, session.refresh_token, session.expires_in, state]);
-  
-  // For global (temporary):
-  if (!global.authSessions) global.authSessions = new Map();
-  global.authSessions.set(state, session);
-}
-
-async function deleteSession(state) {
-  // For Redis:
-  // await redis.del(`auth_session:${state}`);
-  
-  // For Database:
-  // await pool.query('DELETE FROM auth_sessions WHERE state = $1', [state]);
-  
-  // For global (temporary):
-  global.authSessions?.delete(state);
 }
