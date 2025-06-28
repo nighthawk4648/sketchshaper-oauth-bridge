@@ -1,14 +1,16 @@
-// api/auth-status.js - Fixed version with Redis for persistent storage
-import { createClient } from 'redis';
+// api/auth-status.js - Simple version using global state with proper initialization
+import fs from 'fs';
+import path from 'path';
 
-// Initialize Redis client
-const redis = createClient({
-  url: process.env.REDIS_URL || 'redis://localhost:6379'
-});
+// Use a temporary directory for session storage
+const SESSIONS_DIR = '/tmp/auth_sessions';
 
-redis.on('error', (err) => console.error('Redis Client Error', err));
+// Ensure the sessions directory exists
+if (!fs.existsSync(SESSIONS_DIR)) {
+  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+}
 
-export default async function handler(req, res) {
+export default function handler(req, res) {
   // Enable CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -29,28 +31,24 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'State parameter required' });
     }
 
-    // Connect to Redis if not already connected
-    if (!redis.isOpen) {
-      await redis.connect();
-    }
+    const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
 
-    // Try to get the session from Redis
-    const sessionKey = `auth_session:${state}`;
-    const sessionData = await redis.get(sessionKey);
-
-    if (!sessionData) {
+    // Check if session file exists
+    if (!fs.existsSync(sessionFile)) {
       return res.status(404).json({ 
         status: 'pending',
         message: 'Authentication session not found or still pending' 
       });
     }
 
+    // Read session data
+    const sessionData = fs.readFileSync(sessionFile, 'utf8');
     const session = JSON.parse(sessionData);
 
     // Check if session has expired (5 minutes)
     const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
     if (session.timestamp < fiveMinutesAgo) {
-      await redis.del(sessionKey);
+      fs.unlinkSync(sessionFile); // Delete expired session
       return res.status(404).json({ 
         status: 'expired',
         message: 'Authentication session expired' 
@@ -77,12 +75,12 @@ export default async function handler(req, res) {
       response.state = state;
       
       // Clean up the session after successful retrieval
-      await redis.del(sessionKey);
+      fs.unlinkSync(sessionFile);
       
     } else if (session.status === 'error') {
       response.error = session.error;
       // Clean up error sessions too
-      await redis.del(sessionKey);
+      fs.unlinkSync(sessionFile);
     }
 
     console.log('Auth status checked for state:', state, 'Status:', session.status);
@@ -96,3 +94,25 @@ export default async function handler(req, res) {
     });
   }
 }
+
+// Cleanup function to remove old session files (run periodically)
+function cleanupOldSessions() {
+  try {
+    const files = fs.readdirSync(SESSIONS_DIR);
+    const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
+    
+    files.forEach(file => {
+      const filePath = path.join(SESSIONS_DIR, file);
+      const stats = fs.statSync(filePath);
+      
+      if (stats.mtime.getTime() < fiveMinutesAgo) {
+        fs.unlinkSync(filePath);
+      }
+    });
+  } catch (error) {
+    console.error('Cleanup error:', error);
+  }
+}
+
+// Run cleanup on each request (simple approach)
+cleanupOldSessions();
