@@ -1,19 +1,26 @@
-// api/callback.js - Enhanced Patreon OAuth callback handler with debugging
+// api/callback.js - Enhanced Patreon OAuth callback handler with better error handling
 import fs from 'fs';
 import path from 'path';
 
-const SESSIONS_DIR = '/tmp/auth_sessions';
+const SESSIONS_DIR = process.env.VERCEL ? '/tmp/auth_sessions' : './tmp/auth_sessions';
 const SESSION_TIMEOUT = 15 * 60 * 1000; // 15 minutes
 
-// Ensure sessions directory exists
+// Ensure sessions directory exists with better error handling
 function ensureSessionsDirectory() {
   try {
     if (!fs.existsSync(SESSIONS_DIR)) {
       fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+      console.log('Created sessions directory:', SESSIONS_DIR);
     }
+    
+    // Test write permissions
+    const testFile = path.join(SESSIONS_DIR, 'test.json');
+    fs.writeFileSync(testFile, '{"test": true}');
+    fs.unlinkSync(testFile);
+    
     return true;
   } catch (error) {
-    console.error('Failed to create sessions directory:', error);
+    console.error('Failed to create/access sessions directory:', error);
     return false;
   }
 }
@@ -95,12 +102,14 @@ function validateStateAlternative(state) {
   return true;
 }
 
-// Exchange authorization code for tokens
+// Exchange authorization code for tokens with better error handling
 async function exchangeCodeForTokens(code) {
-  const { PATREON_CLIENT_ID, PATREON_CLIENT_SECRET, PATREON_REDIRECT_URI } = process.env;
+  const PATREON_CLIENT_ID = process.env.PATREON_CLIENT_ID || "GhVd_dyhxHNkxgmYCAAjuP-9ohELe-aVI-BaxjeuQ3Shpo1NBEBrveQ9OHiKLDEe";
+  const PATREON_CLIENT_SECRET = process.env.PATREON_CLIENT_SECRET || "NiL8Ip6NzIeAcsIjZ-hk_61VRt9ONo0JVBvxZsJi2tQ-OUedCuRHKCJTgyoOFFJj";
+  const PATREON_REDIRECT_URI = process.env.PATREON_REDIRECT_URI || "https://api2.sketchshaper.com/callback";
   
   if (!PATREON_CLIENT_ID || !PATREON_CLIENT_SECRET || !PATREON_REDIRECT_URI) {
-    throw new Error('Missing Patreon OAuth environment variables');
+    throw new Error('Missing Patreon OAuth configuration');
   }
 
   const params = new URLSearchParams({
@@ -112,8 +121,10 @@ async function exchangeCodeForTokens(code) {
   });
 
   try {
+    console.log('Making token exchange request to Patreon...');
+    
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    const timeoutId = setTimeout(() => controller.abort(), 20000); // Increased timeout
 
     const response = await fetch('https://www.patreon.com/api/oauth2/token', {
       method: 'POST',
@@ -128,12 +139,16 @@ async function exchangeCodeForTokens(code) {
 
     clearTimeout(timeoutId);
 
+    console.log('Token exchange response status:', response.status);
+
     if (!response.ok) {
       const errorText = await response.text();
+      console.error('Token exchange failed:', response.status, errorText);
       throw new Error(`Token exchange failed: ${response.status} ${errorText}`);
     }
 
     const data = await response.json();
+    console.log('Token exchange successful, received access_token:', !!data.access_token);
     
     if (!data.access_token) {
       throw new Error('No access token in response');
@@ -142,10 +157,22 @@ async function exchangeCodeForTokens(code) {
     return data;
 
   } catch (error) {
+    console.error('Token exchange error:', error);
     if (error.name === 'AbortError') {
       throw new Error('Token exchange timeout');
     }
     throw error;
+  }
+}
+
+// Safe file operations with error handling
+function safeWriteFile(filePath, data) {
+  try {
+    fs.writeFileSync(filePath, data);
+    return true;
+  } catch (error) {
+    console.error('Failed to write file:', filePath, error);
+    return false;
   }
 }
 
@@ -201,6 +228,7 @@ function generateSuccessPage() {
         <div class="checkmark">✓</div>
         <h1>Authentication Successful!</h1>
         <p>You can now close this window and return to SketchUp.</p>
+        <p>The extension should automatically detect the successful authentication.</p>
       </div>
     </body>
     </html>
@@ -275,37 +303,36 @@ function generateErrorPage(errorMessage, debugInfo = null) {
 }
 
 export default async function handler(req, res) {
-  console.log('Callback handler started:', req.method, req.url);
+  console.log('=== Callback Handler Started ===');
+  console.log('Method:', req.method);
+  console.log('URL:', req.url);
   console.log('Query parameters:', req.query);
+  console.log('Environment:', process.env.VERCEL ? 'Vercel' : 'Local');
 
   try {
     // Set CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
 
     if (req.method === 'OPTIONS') {
       return res.status(200).end();
     }
 
     if (req.method !== 'GET') {
+      console.error('Invalid method:', req.method);
       return res.status(405).json({ error: 'Method not allowed' });
-    }
-
-    // Ensure sessions directory exists
-    if (!ensureSessionsDirectory()) {
-      console.error('Cannot create sessions directory');
-      return res.status(500).send(generateErrorPage('Server configuration error'));
     }
 
     const { code, state, error, error_description } = req.query;
 
     // Handle OAuth errors
     if (error) {
-      console.error('OAuth error:', error, error_description);
+      console.error('OAuth error received:', error, error_description);
       
-      // Try to store error even with invalid state for debugging
-      if (state) {
+      // Try to ensure sessions directory exists for error storage
+      if (ensureSessionsDirectory() && state) {
         const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
         const sessionData = {
           status: 'error',
@@ -313,17 +340,14 @@ export default async function handler(req, res) {
           timestamp: Date.now()
         };
         
-        try {
-          fs.writeFileSync(sessionFile, JSON.stringify(sessionData, null, 2));
-        } catch (writeError) {
-          console.error('Failed to store error session:', writeError);
-        }
+        safeWriteFile(sessionFile, JSON.stringify(sessionData, null, 2));
       }
 
       return res.status(400).send(generateErrorPage(error_description || error, {
         oauthError: error,
         state: state,
-        hasCode: !!code
+        hasCode: !!code,
+        timestamp: new Date().toISOString()
       }));
     }
 
@@ -333,7 +357,8 @@ export default async function handler(req, res) {
       return res.status(400).send(generateErrorPage('Missing authentication parameters', {
         hasCode: !!code,
         hasState: !!state,
-        state: state
+        state: state,
+        timestamp: new Date().toISOString()
       }));
     }
 
@@ -346,15 +371,21 @@ export default async function handler(req, res) {
       isStateValid = validateStateAlternative(state);
       
       if (!isStateValid) {
-        console.error('Both state validations failed');
+        console.error('Both state validations failed for state:', state);
         return res.status(400).send(generateErrorPage('Invalid authentication state', {
           state: state,
           stateLength: state.length,
           statePattern: /^[a-fA-F0-9]+_\d+$/.test(state),
           alternativePattern: /^[a-zA-Z0-9_-]+$/.test(state),
-          timestamp: Date.now()
+          timestamp: new Date().toISOString()
         }));
       }
+    }
+
+    // Ensure sessions directory exists
+    if (!ensureSessionsDirectory()) {
+      console.error('Cannot create/access sessions directory');
+      return res.status(500).send(generateErrorPage('Server configuration error - cannot access session storage'));
     }
 
     const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
@@ -363,19 +394,19 @@ export default async function handler(req, res) {
     let sessionData;
     
     try {
-      console.log('Attempting token exchange...');
+      console.log('Attempting token exchange for code...');
       const tokenData = await exchangeCodeForTokens(code);
       
       sessionData = {
         status: 'completed',
         access_token: tokenData.access_token,
         refresh_token: tokenData.refresh_token,
-        expires_in: tokenData.expires_in,
-        token_type: tokenData.token_type,
+        expires_in: tokenData.expires_in || 3600,
+        token_type: tokenData.token_type || 'Bearer',
         timestamp: Date.now()
       };
       
-      console.log('Token exchange successful');
+      console.log('Token exchange successful, storing session data...');
       
     } catch (tokenError) {
       console.error('Token exchange failed:', tokenError.message);
@@ -387,25 +418,34 @@ export default async function handler(req, res) {
         timestamp: Date.now(),
         fallback_reason: tokenError.message
       };
+      
+      console.log('Storing fallback session data with code...');
     }
 
     // Store session data
-    try {
-      fs.writeFileSync(sessionFile, JSON.stringify(sessionData, null, 2));
-      console.log('Session data stored successfully');
-    } catch (writeError) {
-      console.error('Failed to store session:', writeError);
+    const sessionDataString = JSON.stringify(sessionData, null, 2);
+    if (!safeWriteFile(sessionFile, sessionDataString)) {
+      console.error('Failed to store session data');
       return res.status(500).send(generateErrorPage('Failed to store authentication session'));
     }
+
+    console.log('Session data stored successfully at:', sessionFile);
+    console.log('Session status:', sessionData.status);
+    console.log('Has access_token:', !!sessionData.access_token);
+    console.log('Has code:', !!sessionData.code);
 
     // Return success page
     return res.status(200).send(generateSuccessPage());
 
   } catch (error) {
-    console.error('Callback handler error:', error);
+    console.error('=== Callback Handler Error ===');
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    
     return res.status(500).send(generateErrorPage('Server error occurred', {
       error: error.message,
-      stack: error.stack
+      timestamp: new Date().toISOString(),
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     }));
   }
 }
