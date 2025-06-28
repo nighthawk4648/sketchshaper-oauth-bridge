@@ -1,3 +1,4 @@
+// api/callback.js - Enhanced Patreon OAuth callback handler with better error handling
 import fs from 'fs';
 import path from 'path';
 
@@ -308,12 +309,21 @@ export default async function handler(req, res) {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
 
     if (req.method === 'OPTIONS') {
-      return res.status(200).end();
+      res.status(200).end();
+      return;
     }
 
     if (req.method !== 'GET') {
-      console.error('Invalid method:', req.method);
-      return res.status(405).json({ error: 'Method not allowed' });
+      console.log('Invalid method:', req.method);
+      res.status(405).html(generateErrorPage('Method not allowed. Only GET requests are supported.'));
+      return;
+    }
+
+    // Ensure sessions directory exists
+    if (!ensureSessionsDirectory()) {
+      console.error('Failed to create sessions directory');
+      res.status(500).html(generateErrorPage('Server configuration error. Please try again later.'));
+      return;
     }
 
     const { code, state, error, error_description } = req.query;
@@ -321,122 +331,99 @@ export default async function handler(req, res) {
     // Handle OAuth errors
     if (error) {
       console.error('OAuth error received:', error, error_description);
-      
-      // Try to ensure sessions directory exists for error storage
-      if (ensureSessionsDirectory() && state) {
-        const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
-        const sessionData = {
-          status: 'error',
-          error: error_description || error,
-          timestamp: Date.now()
-        };
-        
-        safeWriteFile(sessionFile, JSON.stringify(sessionData, null, 2));
-      }
-
-      return res.status(400).send(generateErrorPage(error_description || error, {
-        oauthError: error,
-        state: state,
-        hasCode: !!code,
-        timestamp: new Date().toISOString()
-      }));
+      const errorMessage = error_description || error || 'Unknown OAuth error';
+      res.status(400).html(generateErrorPage(`OAuth Error: ${errorMessage}`, { error, error_description }));
+      return;
     }
 
     // Validate required parameters
-    if (!code || !state) {
-      console.error('Missing required parameters - code:', !!code, 'state:', !!state);
-      return res.status(400).send(generateErrorPage('Missing authentication parameters', {
-        hasCode: !!code,
-        hasState: !!state,
-        state: state,
-        timestamp: new Date().toISOString()
-      }));
+    if (!code) {
+      console.error('Missing authorization code');
+      res.status(400).html(generateErrorPage('Missing authorization code. Please try the authentication process again.'));
+      return;
     }
 
-    // Try primary validation first
-    let isStateValid = validateState(state);
-    
-    // If primary validation fails, try alternative validation
-    if (!isStateValid) {
-      console.log('Primary state validation failed, trying alternative validation...');
-      isStateValid = validateStateAlternative(state);
-      
-      if (!isStateValid) {
-        console.error('Both state validations failed for state:', state);
-        return res.status(400).send(generateErrorPage('Invalid authentication state', {
-          state: state,
-          stateLength: state.length,
-          statePattern: /^[a-fA-F0-9]+_\d+$/.test(state),
-          alternativePattern: /^[a-zA-Z0-9_-]+$/.test(state),
-          timestamp: new Date().toISOString()
-        }));
-      }
+    if (!state) {
+      console.error('Missing state parameter');
+      res.status(400).html(generateErrorPage('Missing state parameter. This is required for security.'));
+      return;
     }
 
-    // Ensure sessions directory exists
-    if (!ensureSessionsDirectory()) {
-      console.error('Cannot create/access sessions directory');
-      return res.status(500).send(generateErrorPage('Server configuration error - cannot access session storage'));
+    // Validate state parameter
+    if (!validateState(state)) {
+      console.error('Invalid state parameter:', state);
+      res.status(400).html(generateErrorPage('Invalid or expired authentication request. Please try again.', { state }));
+      return;
     }
 
-    const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
+    console.log('Parameters validated successfully');
 
-    // Try to exchange code for tokens
-    let sessionData;
-    
+    // Exchange code for tokens
+    let tokenData;
     try {
-      console.log('Attempting token exchange for code...');
-      const tokenData = await exchangeCodeForTokens(code);
-      
-      sessionData = {
-        status: 'completed',
-        access_token: tokenData.access_token,
-        refresh_token: tokenData.refresh_token,
-        expires_in: tokenData.expires_in || 3600,
-        token_type: tokenData.token_type || 'Bearer',
-        timestamp: Date.now()
-      };
-      
-      console.log('Token exchange successful, storing session data...');
-      
-    } catch (tokenError) {
-      console.error('Token exchange failed:', tokenError.message);
-      
-      // Fallback: store the code for client-side exchange
-      sessionData = {
-        status: 'completed',
-        code: code,
-        timestamp: Date.now(),
-        fallback_reason: tokenError.message
-      };
-      
-      console.log('Storing fallback session data with code...');
+      tokenData = await exchangeCodeForTokens(code);
+    } catch (error) {
+      console.error('Token exchange failed:', error);
+      res.status(500).html(generateErrorPage('Failed to complete authentication with Patreon. Please try again.', { error: error.message }));
+      return;
     }
 
-    // Store session data
-    const sessionDataString = JSON.stringify(sessionData, null, 2);
-    if (!safeWriteFile(sessionFile, sessionDataString)) {
-      console.error('Failed to store session data');
-      return res.status(500).send(generateErrorPage('Failed to store authentication session'));
+    // Save session data
+    const sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2)}`;
+    const sessionData = {
+      id: sessionId,
+      access_token: tokenData.access_token,
+      refresh_token: tokenData.refresh_token,
+      expires_in: tokenData.expires_in,
+      token_type: tokenData.token_type,
+      scope: tokenData.scope,
+      created_at: Date.now(),
+      expires_at: Date.now() + (tokenData.expires_in * 1000),
+      state: state
+    };
+
+    const sessionFile = path.join(SESSIONS_DIR, `${sessionId}.json`);
+    
+    if (!safeWriteFile(sessionFile, JSON.stringify(sessionData, null, 2))) {
+      console.error('Failed to save session data');
+      res.status(500).html(generateErrorPage('Failed to save authentication session. Please try again.'));
+      return;
     }
 
-    console.log('Session data stored successfully at:', sessionFile);
-    console.log('Session status:', sessionData.status);
-    console.log('Has access_token:', !!sessionData.access_token);
-    console.log('Has code:', !!sessionData.code);
+    console.log('Session saved successfully:', sessionId);
+
+    // Clean up old sessions
+    try {
+      const files = fs.readdirSync(SESSIONS_DIR);
+      const now = Date.now();
+      
+      for (const file of files) {
+        if (file.endsWith('.json') && file.startsWith('session_')) {
+          const filePath = path.join(SESSIONS_DIR, file);
+          try {
+            const stats = fs.statSync(filePath);
+            const age = now - stats.mtime.getTime();
+            
+            if (age > SESSION_TIMEOUT) {
+              fs.unlinkSync(filePath);
+              console.log('Cleaned up old session:', file);
+            }
+          } catch (cleanupError) {
+            console.error('Error cleaning up session file:', file, cleanupError);
+          }
+        }
+      }
+    } catch (cleanupError) {
+      console.error('Error during session cleanup:', cleanupError);
+      // Don't fail the request if cleanup fails
+    }
 
     // Return success page
-    return res.status(200).send(generateSuccessPage());
+    console.log('=== Authentication Successful ===');
+    res.status(200).html(generateSuccessPage());
 
   } catch (error) {
-    console.error('=== Callback Handler Error ===');
-    console.error('Error message:', error.message);
-    console.error('Error stack:', error.stack);
-    
-    return res.status(500).send(generateErrorPage('Server error occurred', {
-      error: error.message,
-      timestamp: new Date().toISOString(),
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    }));
+    console.error('Unexpected error in callback handler:', error);
+    res.status(500).html(generateErrorPage('An unexpected error occurred. Please try again.', { error: error.message, stack: error.stack }));
   }
 }
