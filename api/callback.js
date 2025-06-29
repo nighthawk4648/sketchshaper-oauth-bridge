@@ -31,13 +31,13 @@ module.exports = async (req, res) => {
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    // Parse query parameters
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    const code = url.searchParams.get('code');
-    const state = url.searchParams.get('state');
-    const error = url.searchParams.get('error');
+    // Parse query parameters - Use req.query for Vercel
+    const code = req.query.code;
+    const state = req.query.state;
+    const error = req.query.error;
 
-    console.log(`OAuth callback received - State: ${state}, Error: ${error}`);
+    console.log(`OAuth callback received - State: ${state}, Code: ${code ? 'present' : 'missing'}, Error: ${error}`);
+    console.log('Full query:', req.query);
 
     if (error) {
       console.error('OAuth error:', error);
@@ -53,6 +53,10 @@ module.exports = async (req, res) => {
 
     if (!code || !state) {
       console.error('Missing code or state in callback');
+      console.error('Code:', code);
+      console.error('State:', state);
+      console.error('All query params:', req.query);
+      
       if (state) {
         await SessionManager.updateSession(state, {
           status: 'error',
@@ -67,6 +71,10 @@ module.exports = async (req, res) => {
       // Exchange code for tokens
       const patreonClient = new PatreonClient();
       const tokenData = await patreonClient.exchangeCodeForToken(code);
+      
+      if (!tokenData) {
+        throw new Error('Token exchange returned null');
+      }
       
       // Update session with token data
       await SessionManager.updateSession(state, {

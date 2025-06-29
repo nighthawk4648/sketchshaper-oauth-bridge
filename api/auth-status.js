@@ -1,8 +1,7 @@
-// api/auth-status.js - Check authentication status
+// api/auth-status.js
 const cors = require('cors');
 const SessionManager = require('../lib/sessionManager');
 
-// CORS configuration
 const corsOptions = {
   origin: ['https://api2.sketchshaper.com', 'http://localhost:3000', 'https://localhost:3000'],
   credentials: true,
@@ -20,36 +19,29 @@ module.exports = async (req, res) => {
       });
     });
 
-    // Handle preflight requests
     if (req.method === 'OPTIONS') {
       return res.status(200).end();
     }
 
-    // Only allow GET requests
     if (req.method !== 'GET') {
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    // Parse query parameters
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    const state = url.searchParams.get('state');
+    const { state } = req.query;
 
     if (!state) {
       return res.status(400).json({ 
         status: 'error', 
-        error: 'Missing state parameter',
-        timestamp: new Date().toISOString()
+        error: 'Missing state parameter' 
       });
     }
 
-    // Load session
     const session = await SessionManager.loadSession(state);
     
     if (!session) {
       return res.status(404).json({ 
         status: 'error', 
-        error: 'Session not found or expired',
-        timestamp: new Date().toISOString()
+        error: 'Session not found or expired' 
       });
     }
 
@@ -65,9 +57,6 @@ module.exports = async (req, res) => {
       response.refresh_token = session.refresh_token;
       response.expires_in = session.expires_in;
       response.token_type = session.token_type;
-      
-      // Clean up session after successful retrieval (optional)
-      // await SessionManager.deleteSession(state);
     }
 
     // Include error if failed
@@ -81,8 +70,7 @@ module.exports = async (req, res) => {
     console.error('Status check error:', error);
     res.status(500).json({ 
       status: 'error', 
-      error: 'Failed to check authentication status',
-      timestamp: new Date().toISOString()
+      error: 'Failed to check authentication status' 
     });
   }
 };
