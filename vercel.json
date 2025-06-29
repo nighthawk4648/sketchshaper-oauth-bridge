@@ -28,9 +28,12 @@
     }
   },
   "env": {
-    "PATREON_CLIENT_ID": "@patreon_client_id",
-    "PATREON_CLIENT_SECRET": "@patreon_client_secret",
-    "PATREON_REDIRECT_URI": "@patreon_redirect_uri",
-    "BASE_URL": "@base_url"
+    "PATREON_CLIENT_ID": "GhVd_dyhxHNkxgmYCAAjuP-9ohELe-aVI-BaxjeuQ3Shpo1NBEBrveQ9OHiKLDEe",
+    "PATREON_CLIENT_SECRET": "NiL8Ip6NzIeAcsIjZ-hk_61VRt9ONo0JVBvxZsJi2tQ-OUedCuRHKCJTgyoOFFJj",
+    "PATREON_REDIRECT_URI": "https://api2.sketchshaper.com/callback",
+    "BASE_URL": "https://api2.sketchshaper.com",
+    "PORT": "3001",
+    "NODE_ENV": "production",
+    "SESSIONS_DIR": "/tmp/auth_sessions"
   }
 }
