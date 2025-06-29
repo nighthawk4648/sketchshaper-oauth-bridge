@@ -1,4 +1,4 @@
-// server.js - Complete Patreon OAuth server
+// server.js - Complete Patreon OAuth server (Production Configuration)
 import 'dotenv/config'; // Add this line to load .env file
 import http from 'http';
 import https from 'https';
@@ -13,7 +13,7 @@ const __dirname = path.dirname(__filename);
 
 // Configuration
 const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || 'localhost';
+const HOST = process.env.HOST || '0.0.0.0'; // Changed from localhost to accept all interfaces
 const SESSIONS_DIR = './tmp/auth_sessions';
 const SESSION_TIMEOUT = 15 * 60 * 1000; // 15 minutes
 
@@ -556,11 +556,11 @@ async function handleAuthStatus(req, res, query) {
   console.log('=== Auth Status Handler Started ===');
   console.log('Query parameters:', query);
   
-  // Set CORS headers
+  // Set CORS headers for production use
   const headers = {
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': process.env.ALLOWED_ORIGINS || '*',
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, User-Agent',
+    'Access-Control-Allow-Headers': 'Content-Type, User-Agent, Authorization',
     'Cache-Control': 'no-cache, no-store, must-revalidate',
     'Content-Type': 'application/json'
   };
@@ -693,9 +693,9 @@ const server = http.createServer(async (req, res) => {
     // Handle CORS preflight
     if (req.method === 'OPTIONS') {
       res.writeHead(200, {
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': process.env.ALLOWED_ORIGINS || '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, User-Agent'
+        'Access-Control-Allow-Headers': 'Content-Type, User-Agent, Authorization'
       });
       res.end();
       return;
@@ -713,9 +713,12 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ 
         status: 'ok', 
         timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV || 'development',
         config: {
           clientId: PATREON_CONFIG.clientId ? 'configured' : 'missing',
-          redirectUri: PATREON_CONFIG.redirectUri
+          redirectUri: PATREON_CONFIG.redirectUri,
+          host: HOST,
+          port: PORT
         }
       }));
     } else {
@@ -728,6 +731,8 @@ GET  /auth     - Start OAuth flow
 GET  /callback - OAuth callback
 GET  /auth-status?state=X - Check auth status
 GET  /health   - Health check
+
+Production Server: api2.sketchshaper.com
 `);
     }
   } catch (error) {
@@ -741,14 +746,20 @@ GET  /health   - Health check
 });
 
 server.listen(PORT, HOST, () => {
-  console.log('🚀 Patreon OAuth Server running on http://' + HOST + ':' + PORT);
+  const isProduction = process.env.NODE_ENV === 'production';
+  const serverUrl = isProduction ? 'https://api2.sketchshaper.com' : `http://${HOST}:${PORT}`;
+  
+  console.log(`🚀 Patreon OAuth Server running on ${serverUrl}`);
   console.log('📍 Available endpoints:');
-  console.log('  http://' + HOST + ':' + PORT + '/auth - Start OAuth flow');
-  console.log('  http://' + HOST + ':' + PORT + '/callback - OAuth callback');
-  console.log('  http://' + HOST + ':' + PORT + '/auth-status?state=X - Check status');
-  console.log('  http://' + HOST + ':' + PORT + '/health - Health check');
+  console.log(`  ${serverUrl}/auth - Start OAuth flow`);
+  console.log(`  ${serverUrl}/callback - OAuth callback`);
+  console.log(`  ${serverUrl}/auth-status?state=X - Check status`);
+  console.log(`  ${serverUrl}/health - Health check`);
   console.log('');
   console.log('🔧 Configuration:');
+  console.log('  Environment:', process.env.NODE_ENV || 'development');
+  console.log('  Host:', HOST);
+  console.log('  Port:', PORT);
   console.log('  Client ID:', PATREON_CONFIG.clientId ? 'configured' : '❌ MISSING');
   console.log('  Client Secret:', PATREON_CONFIG.clientSecret ? 'configured' : '❌ MISSING');
   console.log('  Redirect URI:', PATREON_CONFIG.redirectUri);
