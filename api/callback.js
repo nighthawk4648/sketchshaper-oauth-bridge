@@ -1,147 +1,188 @@
-export default async function handler(req, res) {
-  console.log('=== Callback Handler Started ===');
-  console.log('Method:', req.method);
-  console.log('URL:', req.url);
-  console.log('Query parameters:', req.query);
-  console.log('Environment:', process.env.VERCEL ? 'Vercel' : 'Local');
+// api/callback.js - OAuth callback handler
+const cors = require('cors');
+const SessionManager = require('../lib/sessionManager');
+const PatreonClient = require('../lib/patreonClient');
 
+// CORS configuration
+const corsOptions = {
+  origin: ['https://api2.sketchshaper.com', 'http://localhost:3000', 'https://localhost:3000'],
+  credentials: true,
+  methods: ['GET', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+};
+
+module.exports = async (req, res) => {
   try {
-    // Set CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    // Apply CORS
+    await new Promise((resolve, reject) => {
+      cors(corsOptions)(req, res, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
 
+    // Handle preflight requests
     if (req.method === 'OPTIONS') {
       return res.status(200).end();
     }
 
+    // Only allow GET requests
     if (req.method !== 'GET') {
-      console.error('Invalid method:', req.method);
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    const { code, state, error, error_description } = req.query;
+    // Parse query parameters
+    const url = new URL(req.url, `https://${req.headers.host}`);
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    const error = url.searchParams.get('error');
 
-    // Handle OAuth errors
+    console.log(`OAuth callback received - State: ${state}, Error: ${error}`);
+
     if (error) {
-      console.error('OAuth error received:', error, error_description);
-      
-      // Try to ensure sessions directory exists for error storage
-      if (ensureSessionsDirectory() && state) {
-        const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
-        const sessionData = {
+      console.error('OAuth error:', error);
+      if (state) {
+        await SessionManager.updateSession(state, {
           status: 'error',
-          error: error_description || error,
-          timestamp: Date.now()
-        };
-        
-        safeWriteFile(sessionFile, JSON.stringify(sessionData, null, 2));
+          error: error,
+          completedAt: Date.now()
+        });
       }
-
-      return res.status(400).send(generateErrorPage(error_description || error, {
-        oauthError: error,
-        state: state,
-        hasCode: !!code,
-        timestamp: new Date().toISOString()
-      }));
+      return res.status(200).send(getCallbackHtml('error', `Authentication failed: ${error}`));
     }
 
-    // Validate required parameters
     if (!code || !state) {
-      console.error('Missing required parameters - code:', !!code, 'state:', !!state);
-      return res.status(400).send(generateErrorPage('Missing authentication parameters', {
-        hasCode: !!code,
-        hasState: !!state,
-        state: state,
-        timestamp: new Date().toISOString()
-      }));
-    }
-
-    // Try primary validation first
-    let isStateValid = validateState(state);
-    
-    // If primary validation fails, try alternative validation
-    if (!isStateValid) {
-      console.log('Primary state validation failed, trying alternative validation...');
-      isStateValid = validateStateAlternative(state);
-      
-      if (!isStateValid) {
-        console.error('Both state validations failed for state:', state);
-        return res.status(400).send(generateErrorPage('Invalid authentication state', {
-          state: state,
-          stateLength: state.length,
-          statePattern: /^[a-fA-F0-9]+_\d+$/.test(state),
-          alternativePattern: /^[a-zA-Z0-9_-]+$/.test(state),
-          timestamp: new Date().toISOString()
-        }));
+      console.error('Missing code or state in callback');
+      if (state) {
+        await SessionManager.updateSession(state, {
+          status: 'error',
+          error: 'Missing authorization code',
+          completedAt: Date.now()
+        });
       }
+      return res.status(200).send(getCallbackHtml('error', 'Invalid callback parameters'));
     }
 
-    // Ensure sessions directory exists
-    if (!ensureSessionsDirectory()) {
-      console.error('Cannot create/access sessions directory');
-      return res.status(500).send(generateErrorPage('Server configuration error - cannot access session storage'));
-    }
-
-    const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
-
-    // Try to exchange code for tokens
-    let sessionData;
-    
     try {
-      console.log('Attempting token exchange for code...');
-      const tokenData = await exchangeCodeForTokens(code);
+      // Exchange code for tokens
+      const patreonClient = new PatreonClient();
+      const tokenData = await patreonClient.exchangeCodeForToken(code);
       
-      sessionData = {
+      // Update session with token data
+      await SessionManager.updateSession(state, {
         status: 'completed',
         access_token: tokenData.access_token,
         refresh_token: tokenData.refresh_token,
-        expires_in: tokenData.expires_in || 3600,
-        token_type: tokenData.token_type || 'Bearer',
-        timestamp: Date.now()
-      };
-      
-      console.log('Token exchange successful, storing session data...');
-      
+        expires_in: tokenData.expires_in,
+        token_type: tokenData.token_type,
+        completedAt: Date.now()
+      });
+
+      console.log(`Authentication completed for state: ${state}`);
+      res.status(200).send(getCallbackHtml('success', 'Authentication successful! You can close this window.'));
+
     } catch (tokenError) {
-      console.error('Token exchange failed:', tokenError.message);
-      
-      // Fallback: store the code for client-side exchange
-      sessionData = {
-        status: 'completed',
-        code: code,
-        timestamp: Date.now(),
-        fallback_reason: tokenError.message
-      };
-      
-      console.log('Storing fallback session data with code...');
+      console.error('Token exchange failed:', tokenError);
+      await SessionManager.updateSession(state, {
+        status: 'error',
+        error: 'Token exchange failed',
+        completedAt: Date.now()
+      });
+      res.status(200).send(getCallbackHtml('error', 'Failed to exchange authorization code'));
     }
-
-    // Store session data
-    const sessionDataString = JSON.stringify(sessionData, null, 2);
-    if (!safeWriteFile(sessionFile, sessionDataString)) {
-      console.error('Failed to store session data');
-      return res.status(500).send(generateErrorPage('Failed to store authentication session'));
-    }
-
-    console.log('Session data stored successfully at:', sessionFile);
-    console.log('Session status:', sessionData.status);
-    console.log('Has access_token:', !!sessionData.access_token);
-    console.log('Has code:', !!sessionData.code);
-
-    // Return success page
-    return res.status(200).send(generateSuccessPage());
 
   } catch (error) {
-    console.error('=== Callback Handler Error ===');
-    console.error('Error message:', error.message);
-    console.error('Error stack:', error.stack);
-    
-    return res.status(500).send(generateErrorPage('Server error occurred', {
-      error: error.message,
-      timestamp: new Date().toISOString(),
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    }));
+    console.error('Callback processing error:', error);
+    res.status(200).send(getCallbackHtml('error', 'Authentication processing failed'));
   }
+};
+
+// Generate callback HTML
+function getCallbackHtml(status, message) {
+  const isSuccess = status === 'success';
+  const bgColor = isSuccess ? '#f0f9ff' : '#fef2f2';
+  const textColor = isSuccess ? '#1e40af' : '#dc2626';
+  const icon = isSuccess ? '✅' : '❌';
+
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <title>SketchShaper Authentication</title>
+      <style>
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          background: ${bgColor};
+          margin: 0;
+          padding: 40px 20px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 100vh;
+        }
+        .container {
+          background: white;
+          border-radius: 12px;
+          padding: 40px;
+          box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+          text-align: center;
+          max-width: 500px;
+          width: 100%;
+        }
+        .icon {
+          font-size: 48px;
+          margin-bottom: 20px;
+        }
+        h1 {
+          color: ${textColor};
+          margin: 0 0 15px 0;
+          font-size: 24px;
+        }
+        p {
+          color: #6b7280;
+          margin: 0 0 30px 0;
+          font-size: 16px;
+          line-height: 1.5;
+        }
+        .btn {
+          background: ${textColor};
+          color: white;
+          padding: 12px 24px;
+          border: none;
+          border-radius: 8px;
+          font-size: 16px;
+          cursor: pointer;
+          transition: opacity 0.2s;
+        }
+        .btn:hover {
+          opacity: 0.9;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="icon">${icon}</div>
+        <h1>${isSuccess ? 'Authentication Successful!' : 'Authentication Failed'}</h1>
+        <p>${message}</p>
+        <button class="btn" onclick="window.close()">Close Window</button>
+      </div>
+      <script>
+        // Auto-close after 5 seconds
+        setTimeout(() => {
+          window.close();
+        }, 5000);
+        
+        // Post message to parent window if in popup
+        if (window.opener) {
+          window.opener.postMessage({
+            type: 'patreon-auth-callback',
+            status: '${status}',
+            message: '${message}'
+          }, '*');
+        }
+      </script>
+    </body>
+    </html>
+  `;
 }

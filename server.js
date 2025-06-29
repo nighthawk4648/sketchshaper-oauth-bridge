@@ -1,798 +1,502 @@
-// server.js - Complete Patreon OAuth server (Production Configuration)
-import 'dotenv/config'; // Add this line to load .env file
-import http from 'http';
-import https from 'https';
-import url from 'url';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import querystring from 'querystring';
+// server.js - Main Express server for Patreon OAuth
+const express = require('express');
+const cors = require('cors');
+const fs = require('fs').promises;
+const path = require('path');
+const crypto = require('crypto');
+const fetch = require('node-fetch');
+require('dotenv').config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+// Middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(cors({
+  origin: ['https://api2.sketchshaper.com', 'http://localhost:3000'],
+  credentials: true
+}));
 
 // Configuration
-const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || '0.0.0.0'; // Changed from localhost to accept all interfaces
-const SESSIONS_DIR = './tmp/auth_sessions';
-const SESSION_TIMEOUT = 15 * 60 * 1000; // 15 minutes
-
-// Patreon OAuth Config
 const PATREON_CONFIG = {
   clientId: process.env.PATREON_CLIENT_ID,
   clientSecret: process.env.PATREON_CLIENT_SECRET,
-  redirectUri: process.env.PATREON_REDIRECT_URI,
-  authUrl: 'https://www.patreon.com/oauth2/authorize',
-  tokenUrl: 'https://www.patreon.com/api/oauth2/token',
-  scopes: ['identity', 'identity[email]', 'identity.memberships']
+  redirectUri: process.env.PATREON_REDIRECT_URI || 'https://api2.sketchshaper.com/callback',
+  baseUrl: process.env.BASE_URL || 'https://api2.sketchshaper.com'
 };
 
+// Session storage directory
+const SESSIONS_DIR = process.env.SESSIONS_DIR || '/tmp/auth_sessions';
+const SESSION_TIMEOUT = 15 * 60 * 1000; // 15 minutes
+
 // Ensure sessions directory exists
-function ensureSessionsDirectory() {
+async function ensureSessionsDir() {
   try {
-    if (!fs.existsSync(SESSIONS_DIR)) {
-      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-    }
-    return true;
+    await fs.mkdir(SESSIONS_DIR, { recursive: true });
+    console.log(`Sessions directory ready: ${SESSIONS_DIR}`);
   } catch (error) {
     console.error('Failed to create sessions directory:', error);
-    return false;
   }
 }
 
-// Utility functions
+// Generate secure state parameter
 function generateState() {
-  const randomBytes = Math.random().toString(36).substring(2, 15) + 
-                     Math.random().toString(36).substring(2, 15);
+  const randomBytes = crypto.randomBytes(32).toString('hex');
   const timestamp = Date.now();
   return `${randomBytes}_${timestamp}`;
 }
 
-function validateState(state) {
-  if (!state || typeof state !== 'string') {
-    return false;
+// Save session data
+async function saveSession(state, data) {
+  try {
+    const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
+    const sessionData = {
+      ...data,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + SESSION_TIMEOUT
+    };
+    await fs.writeFile(sessionFile, JSON.stringify(sessionData, null, 2));
+    console.log(`Session saved: ${state}`);
+  } catch (error) {
+    console.error('Failed to save session:', error);
   }
-  
-  if (!/^[a-zA-Z0-9_-]+$/.test(state) || state.length < 10 || state.length > 100) {
-    return false;
-  }
-  
-  // Check if it has timestamp format
-  const parts = state.split('_');
-  if (parts.length >= 2) {
-    const timestamp = parseInt(parts[parts.length - 1]);
-    const now = Date.now();
-    const maxAge = 30 * 60 * 1000; // 30 minutes
+}
+
+// Load session data
+async function loadSession(state) {
+  try {
+    const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
+    const data = await fs.readFile(sessionFile, 'utf8');
+    const session = JSON.parse(data);
     
-    if (timestamp > 0 && timestamp <= now && (now - timestamp) <= maxAge) {
-      return true;
+    // Check if session expired
+    if (Date.now() > session.expiresAt) {
+      await deleteSession(state);
+      return null;
     }
-  }
-  
-  return true; // Allow other valid formats for flexibility
-}
-
-function safeWriteFile(filePath, data) {
-  try {
-    fs.writeFileSync(filePath, data, 'utf8');
-    return true;
+    
+    return session;
   } catch (error) {
-    console.error('Failed to write file:', filePath, error.message);
-    return false;
-  }
-}
-
-function safeReadFile(filePath) {
-  try {
-    return fs.readFileSync(filePath, 'utf8');
-  } catch (error) {
-    console.error('Failed to read file:', filePath, error.message);
+    console.log(`Session not found or invalid: ${state}`);
     return null;
   }
 }
 
-function safeDeleteFile(filePath) {
+// Update session data
+async function updateSession(state, updates) {
   try {
-    fs.unlinkSync(filePath);
+    const session = await loadSession(state);
+    if (!session) return false;
+    
+    const updatedSession = { ...session, ...updates };
+    await saveSession(state, updatedSession);
     return true;
   } catch (error) {
-    console.error('Failed to delete file:', filePath, error.message);
+    console.error('Failed to update session:', error);
     return false;
   }
 }
 
-// Clean up expired sessions
-function cleanupExpiredSessions() {
+// Delete session
+async function deleteSession(state) {
   try {
-    if (!fs.existsSync(SESSIONS_DIR)) return;
-    
-    const files = fs.readdirSync(SESSIONS_DIR);
+    const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
+    await fs.unlink(sessionFile);
+    console.log(`Session deleted: ${state}`);
+  } catch (error) {
+    // File might not exist, which is fine
+  }
+}
+
+// Clean up expired sessions
+async function cleanupExpiredSessions() {
+  try {
+    const files = await fs.readdir(SESSIONS_DIR);
     const now = Date.now();
-    let cleaned = 0;
     
     for (const file of files) {
       if (!file.endsWith('.json')) continue;
       
-      const filePath = path.join(SESSIONS_DIR, file);
-      try {
-        const stats = fs.statSync(filePath);
-        const age = now - stats.mtime.getTime();
-        
-        if (age > SESSION_TIMEOUT) {
-          fs.unlinkSync(filePath);
-          cleaned++;
-        }
-      } catch (error) {
-        // File doesn't exist or can't be accessed, try to remove
-        try {
-          fs.unlinkSync(filePath);
-          cleaned++;
-        } catch (e) {}
+      const sessionFile = path.join(SESSIONS_DIR, file);
+      const data = await fs.readFile(sessionFile, 'utf8');
+      const session = JSON.parse(data);
+      
+      if (now > session.expiresAt) {
+        await fs.unlink(sessionFile);
+        console.log(`Cleaned up expired session: ${file}`);
       }
     }
-    
-    if (cleaned > 0) {
-      console.log(`Cleaned up ${cleaned} expired session files`);
-    }
   } catch (error) {
-    console.error('Session cleanup error:', error);
+    console.error('Error cleaning up sessions:', error);
   }
-}
-
-// HTTP request helper
-function makeHttpRequest(options, postData = null) {
-  return new Promise((resolve, reject) => {
-    const client = options.protocol === 'https:' ? https : http;
-    
-    const req = client.request(options, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          const response = {
-            statusCode: res.statusCode,
-            headers: res.headers,
-            body: data
-          };
-          
-          if (res.headers['content-type']?.includes('application/json')) {
-            response.data = JSON.parse(data);
-          }
-          
-          resolve(response);
-        } catch (error) {
-          reject(error);
-        }
-      });
-    });
-    
-    req.on('error', reject);
-    
-    if (postData) {
-      req.write(postData);
-    }
-    
-    req.end();
-  });
 }
 
 // Exchange authorization code for access token
-async function exchangeCodeForTokens(code) {
-  const tokenData = querystring.stringify({
-    code: code,
-    grant_type: 'authorization_code',
-    client_id: PATREON_CONFIG.clientId,
-    client_secret: PATREON_CONFIG.clientSecret,
-    redirect_uri: PATREON_CONFIG.redirectUri
-  });
-
-  const options = {
-    hostname: 'www.patreon.com',
-    port: 443,
-    path: '/api/oauth2/token',
-    method: 'POST',
-    protocol: 'https:',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Content-Length': Buffer.byteLength(tokenData),
-      'User-Agent': 'SketchShaper-OAuth/1.0'
-    }
-  };
-
-  const response = await makeHttpRequest(options, tokenData);
-  
-  if (response.statusCode !== 200) {
-    throw new Error(`Token exchange failed: ${response.statusCode} - ${response.body}`);
-  }
-  
-  if (!response.data || !response.data.access_token) {
-    throw new Error('Invalid token response: missing access_token');
-  }
-  
-  return response.data;
-}
-
-// Generate HTML pages
-function generateAuthPage(authUrl, state) {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Patreon Authentication - SketchShaper</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #FF424D, #FF8A80);
-            margin: 0;
-            padding: 20px;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .container {
-            background: white;
-            padding: 40px;
-            border-radius: 12px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-            text-align: center;
-            max-width: 400px;
-            width: 100%;
-        }
-        .logo {
-            font-size: 32px;
-            font-weight: bold;
-            color: #FF424D;
-            margin-bottom: 20px;
-        }
-        h1 {
-            color: #333;
-            margin-bottom: 20px;
-        }
-        p {
-            color: #666;
-            line-height: 1.6;
-            margin-bottom: 30px;
-        }
-        .auth-button {
-            background: #FF424D;
-            color: white;
-            padding: 15px 30px;
-            border: none;
-            border-radius: 6px;
-            font-size: 16px;
-            font-weight: 600;
-            text-decoration: none;
-            display: inline-block;
-            transition: background 0.3s;
-        }
-        .auth-button:hover {
-            background: #e63946;
-        }
-        .state-info {
-            margin-top: 20px;
-            padding: 10px;
-            background: #f8f9fa;
-            border-radius: 4px;
-            font-size: 12px;
-            color: #666;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="logo">🎨 SketchShaper</div>
-        <h1>Connect with Patreon</h1>
-        <p>To continue, you need to authenticate with your Patreon account. This will allow SketchShaper to verify your subscription status.</p>
-        <a href="${authUrl}" class="auth-button">Connect to Patreon</a>
-        <div class="state-info">
-            Session ID: ${state.substring(0, 8)}...
-        </div>
-    </div>
-</body>
-</html>`;
-}
-
-function generateSuccessPage() {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Authentication Successful - SketchShaper</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #4CAF50, #81C784);
-            margin: 0;
-            padding: 20px;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .container {
-            background: white;
-            padding: 40px;
-            border-radius: 12px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-            text-align: center;
-            max-width: 400px;
-            width: 100%;
-        }
-        .success-icon {
-            font-size: 48px;
-            color: #4CAF50;
-            margin-bottom: 20px;
-        }
-        h1 {
-            color: #333;
-            margin-bottom: 20px;
-        }
-        p {
-            color: #666;
-            line-height: 1.6;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="success-icon">✅</div>
-        <h1>Authentication Successful!</h1>
-        <p>You have successfully connected your Patreon account. You can now close this window and return to SketchShaper.</p>
-        <p><small>This window will close automatically in a few seconds...</small></p>
-    </div>
-    <script>
-        setTimeout(() => {
-            window.close();
-        }, 3000);
-    </script>
-</body>
-</html>`;
-}
-
-function generateErrorPage(error, details = {}) {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Authentication Error - SketchShaper</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #f44336, #ef5350);
-            margin: 0;
-            padding: 20px;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .container {
-            background: white;
-            padding: 40px;
-            border-radius: 12px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-            text-align: center;
-            max-width: 400px;
-            width: 100%;
-        }
-        .error-icon {
-            font-size: 48px;
-            color: #f44336;
-            margin-bottom: 20px;
-        }
-        h1 {
-            color: #333;
-            margin-bottom: 20px;
-        }
-        p {
-            color: #666;
-            line-height: 1.6;
-        }
-        .details {
-            margin-top: 20px;
-            padding: 10px;
-            background: #f8f9fa;
-            border-radius: 4px;
-            font-size: 12px;
-            color: #666;
-            text-align: left;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="error-icon">❌</div>
-        <h1>Authentication Failed</h1>
-        <p>${error}</p>
-        <p>Please try again or contact support if the problem persists.</p>
-        ${Object.keys(details).length > 0 ? `
-        <details class="details">
-            <summary>Technical Details</summary>
-            <pre>${JSON.stringify(details, null, 2)}</pre>
-        </details>
-        ` : ''}
-    </div>
-</body>
-</html>`;
-}
-
-// Route handlers
-async function handleAuth(req, res, query) {
-  console.log('Auth request received');
-  
-  // Generate state parameter
-  const state = generateState();
-  
-  // Build authorization URL
-  const authParams = {
-    response_type: 'code',
-    client_id: PATREON_CONFIG.clientId,
-    redirect_uri: PATREON_CONFIG.redirectUri,
-    scope: PATREON_CONFIG.scopes.join(' '),
-    state: state
-  };
-  
-  const authUrl = `${PATREON_CONFIG.authUrl}?${querystring.stringify(authParams)}`;
-  
-  console.log('Generated auth URL:', authUrl);
-  console.log('State:', state);
-  
-  // Store initial session
-  if (ensureSessionsDirectory()) {
-    const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
-    const sessionData = {
-      status: 'pending',
-      created: Date.now(),
-      state: state
-    };
-    safeWriteFile(sessionFile, JSON.stringify(sessionData, null, 2));
-  }
-  
-  // Return auth page
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(generateAuthPage(authUrl, state));
-}
-
-async function handleCallback(req, res, query) {
-  console.log('=== Callback Handler Started ===');
-  console.log('Query parameters:', query);
-  
-  const { code, state, error, error_description } = query;
-  
-  // Handle OAuth errors
-  if (error) {
-    console.error('OAuth error received:', error, error_description);
-    
-    if (state && ensureSessionsDirectory()) {
-      const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
-      const sessionData = {
-        status: 'error',
-        error: error_description || error,
-        timestamp: Date.now()
-      };
-      safeWriteFile(sessionFile, JSON.stringify(sessionData, null, 2));
-    }
-    
-    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(generateErrorPage(error_description || error));
-    return;
-  }
-  
-  // Validate required parameters
-  if (!code || !state) {
-    console.error('Missing required parameters - code:', !!code, 'state:', !!state);
-    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(generateErrorPage('Missing authentication parameters'));
-    return;
-  }
-  
-  // Validate state
-  if (!validateState(state)) {
-    console.error('Invalid state parameter:', state);
-    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(generateErrorPage('Invalid authentication state'));
-    return;
-  }
-  
-  if (!ensureSessionsDirectory()) {
-    console.error('Cannot access sessions directory');
-    res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(generateErrorPage('Server configuration error'));
-    return;
-  }
-  
-  const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
-  let sessionData;
-  
+async function exchangeCodeForToken(code, state) {
   try {
-    console.log('Attempting token exchange...');
-    const tokenData = await exchangeCodeForTokens(code);
+    const response = await fetch('https://www.patreon.com/api/oauth2/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'SketchShaper-Server/1.0'
+      },
+      body: new URLSearchParams({
+        code: code,
+        grant_type: 'authorization_code',
+        client_id: PATREON_CONFIG.clientId,
+        client_secret: PATREON_CONFIG.clientSecret,
+        redirect_uri: PATREON_CONFIG.redirectUri
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Token exchange failed:', response.status, errorText);
+      return null;
+    }
+
+    const tokenData = await response.json();
+    console.log('Token exchange successful');
+    return tokenData;
+  } catch (error) {
+    console.error('Token exchange error:', error);
+    return null;
+  }
+}
+
+// Routes
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+// Start OAuth flow
+app.get('/auth', async (req, res) => {
+  try {
+    const state = generateState();
     
-    sessionData = {
+    // Save initial session
+    await saveSession(state, {
+      status: 'pending',
+      userAgent: req.headers['user-agent'],
+      ip: req.ip
+    });
+
+    // Build Patreon OAuth URL
+    const authUrl = new URL('https://www.patreon.com/oauth2/authorize');
+    authUrl.searchParams.set('response_type', 'code');
+    authUrl.searchParams.set('client_id', PATREON_CONFIG.clientId);
+    authUrl.searchParams.set('redirect_uri', PATREON_CONFIG.redirectUri);
+    authUrl.searchParams.set('state', state);
+    authUrl.searchParams.set('scope', 'identity identity.memberships');
+
+    console.log(`Starting OAuth flow for state: ${state}`);
+    res.redirect(authUrl.toString());
+    
+  } catch (error) {
+    console.error('Auth initiation error:', error);
+    res.status(500).json({ error: 'Failed to start authentication' });
+  }
+});
+
+// OAuth callback handler
+app.get('/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+
+  console.log(`OAuth callback received - State: ${state}, Error: ${error}`);
+
+  if (error) {
+    console.error('OAuth error:', error);
+    await updateSession(state, {
+      status: 'error',
+      error: error,
+      completedAt: Date.now()
+    });
+    return res.send(getCallbackHtml('error', `Authentication failed: ${error}`));
+  }
+
+  if (!code || !state) {
+    console.error('Missing code or state in callback');
+    await updateSession(state, {
+      status: 'error',
+      error: 'Missing authorization code',
+      completedAt: Date.now()
+    });
+    return res.send(getCallbackHtml('error', 'Invalid callback parameters'));
+  }
+
+  try {
+    // Exchange code for tokens
+    const tokenData = await exchangeCodeForToken(code, state);
+    
+    if (!tokenData) {
+      await updateSession(state, {
+        status: 'error',
+        error: 'Token exchange failed',
+        completedAt: Date.now()
+      });
+      return res.send(getCallbackHtml('error', 'Failed to exchange authorization code'));
+    }
+
+    // Update session with token data
+    await updateSession(state, {
       status: 'completed',
       access_token: tokenData.access_token,
       refresh_token: tokenData.refresh_token,
-      expires_in: tokenData.expires_in || 3600,
-      token_type: tokenData.token_type || 'Bearer',
-      timestamp: Date.now()
-    };
-    
-    console.log('Token exchange successful');
-    
-  } catch (tokenError) {
-    console.error('Token exchange failed:', tokenError.message);
-    
-    // Fallback: store the code
-    sessionData = {
-      status: 'completed',
-      code: code,
-      timestamp: Date.now(),
-      fallback_reason: tokenError.message
-    };
-    
-    console.log('Storing fallback session with code');
-  }
-  
-  // Store session data
-  if (!safeWriteFile(sessionFile, JSON.stringify(sessionData, null, 2))) {
-    console.error('Failed to store session data');
-    res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(generateErrorPage('Failed to store authentication session'));
-    return;
-  }
-  
-  console.log('Session stored successfully');
-  
-  // Return success page
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(generateSuccessPage());
-}
+      expires_in: tokenData.expires_in,
+      token_type: tokenData.token_type,
+      completedAt: Date.now()
+    });
 
-async function handleAuthStatus(req, res, query) {
-  console.log('=== Auth Status Handler Started ===');
-  console.log('Query parameters:', query);
-  
-  // Set CORS headers for production use
-  const headers = {
-    'Access-Control-Allow-Origin': process.env.ALLOWED_ORIGINS || '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, User-Agent, Authorization',
-    'Cache-Control': 'no-cache, no-store, must-revalidate',
-    'Content-Type': 'application/json'
-  };
-  
-  const { state } = query;
-  
-  if (!state) {
-    res.writeHead(400, headers);
-    res.end(JSON.stringify({ 
-      status: 'error',
-      error: 'State parameter required' 
-    }));
-    return;
-  }
-  
-  if (!validateState(state)) {
-    res.writeHead(400, headers);
-    res.end(JSON.stringify({
-      status: 'error',
-      error: 'Invalid authentication state'
-    }));
-    return;
-  }
-  
-  if (!ensureSessionsDirectory()) {
-    res.writeHead(500, headers);
-    res.end(JSON.stringify({
-      status: 'error',
-      error: 'Server configuration error'
-    }));
-    return;
-  }
-  
-  // Clean up expired sessions
-  try {
-    cleanupExpiredSessions();
-  } catch (e) {
-    console.error('Cleanup error:', e);
-  }
-  
-  const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
-  
-  if (!fs.existsSync(sessionFile)) {
-    res.writeHead(200, headers);
-    res.end(JSON.stringify({ 
-      status: 'pending',
-      message: 'Authentication session not found or still pending'
-    }));
-    return;
-  }
-  
-  const fileContent = safeReadFile(sessionFile);
-  if (!fileContent) {
-    safeDeleteFile(sessionFile);
-    res.writeHead(500, headers);
-    res.end(JSON.stringify({
-      status: 'error',
-      error: 'Failed to read session data'
-    }));
-    return;
-  }
-  
-  let sessionData;
-  try {
-    sessionData = JSON.parse(fileContent);
-  } catch (parseError) {
-    safeDeleteFile(sessionFile);
-    res.writeHead(500, headers);
-    res.end(JSON.stringify({
-      status: 'error',
-      error: 'Corrupted session data'
-    }));
-    return;
-  }
-  
-  // Check session age
-  const now = Date.now();
-  const sessionAge = now - (sessionData.timestamp || sessionData.created || 0);
-  
-  if (sessionAge > SESSION_TIMEOUT) {
-    safeDeleteFile(sessionFile);
-    res.writeHead(200, headers);
-    res.end(JSON.stringify({ 
-      status: 'expired',
-      message: 'Authentication session expired'
-    }));
-    return;
-  }
-  
-  // Prepare response
-  const response = {
-    status: sessionData.status,
-    timestamp: sessionData.timestamp || sessionData.created
-  };
-  
-  if (sessionData.status === 'completed') {
-    if (sessionData.access_token) {
-      response.access_token = sessionData.access_token;
-      response.refresh_token = sessionData.refresh_token;
-      response.expires_in = sessionData.expires_in;
-      response.token_type = sessionData.token_type;
-    } else if (sessionData.code) {
-      response.code = sessionData.code;
-      response.fallback_reason = sessionData.fallback_reason;
-    }
-    
-    response.state = state;
-    
-    // Clean up session after successful retrieval
-    safeDeleteFile(sessionFile);
-    
-  } else if (sessionData.status === 'error') {
-    response.error = sessionData.error;
-    safeDeleteFile(sessionFile);
-  }
-  
-  res.writeHead(200, headers);
-  res.end(JSON.stringify(response));
-}
+    console.log(`Authentication completed for state: ${state}`);
+    res.send(getCallbackHtml('success', 'Authentication successful! You can close this window.'));
 
-// Main server
-const server = http.createServer(async (req, res) => {
-  const parsedUrl = url.parse(req.url, true);
-  const pathname = parsedUrl.pathname;
-  const query = parsedUrl.query;
-  
-  console.log(`${new Date().toISOString()} - ${req.method} ${pathname}`);
-  
-  try {
-    // Handle CORS preflight
-    if (req.method === 'OPTIONS') {
-      res.writeHead(200, {
-        'Access-Control-Allow-Origin': process.env.ALLOWED_ORIGINS || '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, User-Agent, Authorization'
-      });
-      res.end();
-      return;
-    }
-    
-    // Route requests
-    if (pathname === '/auth' || pathname === '/') {
-      await handleAuth(req, res, query);
-    } else if (pathname === '/callback') {
-      await handleCallback(req, res, query);
-    } else if (pathname === '/auth-status') {
-      await handleAuthStatus(req, res, query);
-    } else if (pathname === '/health') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ 
-        status: 'ok', 
-        timestamp: new Date().toISOString(),
-        environment: process.env.NODE_ENV || 'development',
-        config: {
-          clientId: PATREON_CONFIG.clientId ? 'configured' : 'missing',
-          redirectUri: PATREON_CONFIG.redirectUri,
-          host: HOST,
-          port: PORT
-        }
-      }));
-    } else {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end(`Not Found
-
-Available endpoints:
-GET  /         - Start OAuth flow
-GET  /auth     - Start OAuth flow  
-GET  /callback - OAuth callback
-GET  /auth-status?state=X - Check auth status
-GET  /health   - Health check
-
-Production Server: api2.sketchshaper.com
-`);
-    }
   } catch (error) {
-    console.error('Server error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ 
-      error: 'Internal server error', 
-      message: error.message 
-    }));
+    console.error('Callback processing error:', error);
+    await updateSession(state, {
+      status: 'error',
+      error: error.message,
+      completedAt: Date.now()
+    });
+    res.send(getCallbackHtml('error', 'Authentication processing failed'));
   }
 });
 
-server.listen(PORT, HOST, () => {
-  const isProduction = process.env.NODE_ENV === 'production';
-  const serverUrl = isProduction ? 'https://api2.sketchshaper.com' : `http://${HOST}:${PORT}`;
-  
-  console.log(`🚀 Patreon OAuth Server running on ${serverUrl}`);
-  console.log('📍 Available endpoints:');
-  console.log(`  ${serverUrl}/auth - Start OAuth flow`);
-  console.log(`  ${serverUrl}/callback - OAuth callback`);
-  console.log(`  ${serverUrl}/auth-status?state=X - Check status`);
-  console.log(`  ${serverUrl}/health - Health check`);
-  console.log('');
-  console.log('🔧 Configuration:');
-  console.log('  Environment:', process.env.NODE_ENV || 'development');
-  console.log('  Host:', HOST);
-  console.log('  Port:', PORT);
-  console.log('  Client ID:', PATREON_CONFIG.clientId ? 'configured' : '❌ MISSING');
-  console.log('  Client Secret:', PATREON_CONFIG.clientSecret ? 'configured' : '❌ MISSING');
-  console.log('  Redirect URI:', PATREON_CONFIG.redirectUri);
-  console.log('  Sessions Directory:', SESSIONS_DIR);
-  
-  if (!PATREON_CONFIG.clientId || !PATREON_CONFIG.clientSecret) {
-    console.log('');
-    console.log('⚠️  WARNING: Missing Patreon OAuth credentials!');
-    console.log('   Make sure your .env file contains:');
-    console.log('   PATREON_CLIENT_ID=your_client_id');
-    console.log('   PATREON_CLIENT_SECRET=your_client_secret');
-    console.log('   PATREON_REDIRECT_URI=your_redirect_uri');
+// Check authentication status
+app.get('/auth-status', async (req, res) => {
+  const { state } = req.query;
+
+  if (!state) {
+    return res.status(400).json({ 
+      status: 'error', 
+      error: 'Missing state parameter' 
+    });
+  }
+
+  try {
+    const session = await loadSession(state);
+    
+    if (!session) {
+      return res.status(404).json({ 
+        status: 'error', 
+        error: 'Session not found or expired' 
+      });
+    }
+
+    // Return session status
+    const response = {
+      status: session.status,
+      timestamp: new Date().toISOString()
+    };
+
+    // Include token data if completed
+    if (session.status === 'completed' && session.access_token) {
+      response.access_token = session.access_token;
+      response.refresh_token = session.refresh_token;
+      response.expires_in = session.expires_in;
+      response.token_type = session.token_type;
+    }
+
+    // Include error if failed
+    if (session.status === 'error') {
+      response.error = session.error;
+    }
+
+    res.json(response);
+
+  } catch (error) {
+    console.error('Status check error:', error);
+    res.status(500).json({ 
+      status: 'error', 
+      error: 'Failed to check authentication status' 
+    });
   }
 });
 
-server.on('error', (error) => {
-  if (error.code === 'EADDRINUSE') {
-    console.error(`❌ Port ${PORT} is already in use. Try a different port:`);
-    console.error(`   PORT=3001 node server.js`);
-  } else {
-    console.error('❌ Server error:', error);
+// Refresh token endpoint
+app.post('/refresh', async (req, res) => {
+  const { refresh_token } = req.body;
+
+  if (!refresh_token) {
+    return res.status(400).json({ error: 'Missing refresh token' });
+  }
+
+  try {
+    const response = await fetch('https://www.patreon.com/api/oauth2/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'SketchShaper-Server/1.0'
+      },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refresh_token,
+        client_id: PATREON_CONFIG.clientId,
+        client_secret: PATREON_CONFIG.clientSecret
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Token refresh failed:', response.status, errorText);
+      return res.status(response.status).json({ error: 'Token refresh failed' });
+    }
+
+    const tokenData = await response.json();
+    res.json(tokenData);
+
+  } catch (error) {
+    console.error('Token refresh error:', error);
+    res.status(500).json({ error: 'Token refresh failed' });
   }
 });
 
-// Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('🛑 Shutting down server...');
-  server.close(() => {
-    console.log('✅ Server closed.');
-    process.exit(0);
+// Generate callback HTML
+function getCallbackHtml(status, message) {
+  const isSuccess = status === 'success';
+  const bgColor = isSuccess ? '#f0f9ff' : '#fef2f2';
+  const textColor = isSuccess ? '#1e40af' : '#dc2626';
+  const icon = isSuccess ? '✅' : '❌';
+
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <title>SketchShaper Authentication</title>
+      <style>
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          background: ${bgColor};
+          margin: 0;
+          padding: 40px 20px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 100vh;
+        }
+        .container {
+          background: white;
+          border-radius: 12px;
+          padding: 40px;
+          box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+          text-align: center;
+          max-width: 500px;
+          width: 100%;
+        }
+        .icon {
+          font-size: 48px;
+          margin-bottom: 20px;
+        }
+        h1 {
+          color: ${textColor};
+          margin: 0 0 15px 0;
+          font-size: 24px;
+        }
+        p {
+          color: #6b7280;
+          margin: 0 0 30px 0;
+          font-size: 16px;
+          line-height: 1.5;
+        }
+        .btn {
+          background: ${textColor};
+          color: white;
+          padding: 12px 24px;
+          border: none;
+          border-radius: 8px;
+          font-size: 16px;
+          cursor: pointer;
+          transition: opacity 0.2s;
+        }
+        .btn:hover {
+          opacity: 0.9;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="icon">${icon}</div>
+        <h1>${isSuccess ? 'Authentication Successful!' : 'Authentication Failed'}</h1>
+        <p>${message}</p>
+        <button class="btn" onclick="window.close()">Close Window</button>
+      </div>
+      <script>
+        // Auto-close after 5 seconds
+        setTimeout(() => {
+          window.close();
+        }, 5000);
+      </script>
+    </body>
+    </html>
+  `;
+}
+
+// Error handling middleware
+app.use((error, req, res, next) => {
+  console.error('Unhandled error:', error);
+  res.status(500).json({ 
+    error: 'Internal server error',
+    timestamp: new Date().toISOString()
   });
 });
 
-// Clean up sessions on startup
-ensureSessionsDirectory();
-cleanupExpiredSessions();
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ 
+    error: 'Endpoint not found',
+    path: req.path,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Cleanup expired sessions every hour
+setInterval(cleanupExpiredSessions, 60 * 60 * 1000);
+
+// Initialize and start server
+async function startServer() {
+  try {
+    // Validate configuration
+    if (!PATREON_CONFIG.clientId || !PATREON_CONFIG.clientSecret) {
+      throw new Error('Missing required Patreon OAuth credentials');
+    }
+
+    // Ensure sessions directory exists
+    await ensureSessionsDir();
+
+    // Clean up any existing expired sessions
+    await cleanupExpiredSessions();
+
+    // Start server
+    app.listen(PORT, () => {
+      console.log(`🚀 Patreon Auth Server running on port ${PORT}`);
+      console.log(`🔗 Auth URL: ${PATREON_CONFIG.baseUrl}/auth`);
+      console.log(`📝 Callback URL: ${PATREON_CONFIG.redirectUri}`);
+      console.log(`📁 Sessions Directory: ${SESSIONS_DIR}`);
+      console.log(`⏰ Session Timeout: ${SESSION_TIMEOUT / 1000 / 60} minutes`);
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('Received SIGTERM, shutting down gracefully...');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('Received SIGINT, shutting down gracefully...');
+  process.exit(0);
+});
+
+// Start the server
+startServer();

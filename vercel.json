@@ -1,46 +1,42 @@
 {
   "version": 2,
-  "functions": {
-    "api/callback.js": {
-      "maxDuration": 30
+  "builds": [
+    {
+      "src": "api/index.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/auth",
+      "dest": "/api/auth"
     },
-    "api/auth-status.js": {
-      "maxDuration": 15
+    {
+      "src": "/callback",
+      "dest": "/api/callback"
+    },
+    {
+      "src": "/auth-status",
+      "dest": "/api/auth-status"
+    },
+    {
+      "src": "/refresh",
+      "dest": "/api/refresh"
+    },
+    {
+      "src": "/health",
+      "dest": "/api/health"
+    }
+  ],
+  "functions": {
+    "api/*.js": {
+      "maxDuration": 30
     }
   },
-  "rewrites": [
-    {
-      "source": "/callback",
-      "destination": "/api/callback"
-    },
-    {
-      "source": "/auth-status",
-      "destination": "/api/auth-status"
-    }
-  ],
-  "headers": [
-    {
-      "source": "/api/(.*)",
-      "headers": [
-        {
-          "key": "Access-Control-Allow-Origin",
-          "value": "*"
-        },
-        {
-          "key": "Access-Control-Allow-Methods",
-          "value": "GET, POST, OPTIONS"
-        },
-        {
-          "key": "Access-Control-Allow-Headers",
-          "value": "Content-Type, User-Agent, Authorization"
-        },
-        {
-          "key": "Cache-Control",
-          "value": "no-cache, no-store, must-revalidate"
-        }
-      ]
-    }
-  ],
-  "buildCommand": null,
-  "devCommand": null
+  "env": {
+    "PATREON_CLIENT_ID": "@patreon_client_id",
+    "PATREON_CLIENT_SECRET": "@patreon_client_secret",
+    "PATREON_REDIRECT_URI": "@patreon_redirect_uri",
+    "BASE_URL": "@base_url"
+  }
 }
