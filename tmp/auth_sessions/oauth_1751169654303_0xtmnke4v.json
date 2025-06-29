@@ -1,7 +1,0 @@
-{
-  "status": "initiated",
-  "redirect_uri": "http://localhost:3000/callback",
-  "initiated_at": "2025-06-29T04:00:54.303Z",
-  "timestamp": 1751169654303,
-  "created": "2025-06-29T04:00:54.303Z"
-}

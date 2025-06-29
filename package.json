@@ -1,14 +1,31 @@
 {
-  "name": "patreon-auth-server",
+  "name": "patreon-oauth-server",
   "version": "1.0.0",
-  "description": "Patreon OAuth authentication server for SketchShaper",
-  "main": "index.js",
+  "description": "OAuth authentication server for Patreon integration with SketchShaper",
+  "main": "server.js",
+  "type": "module",
   "scripts": {
-    "dev": "vercel dev",
-    "deploy": "vercel --prod"
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node test-server.js",
+    "clean": "rm -rf tmp/auth_sessions/*"
   },
-  "dependencies": {},
-  "devDependencies": {
-    "vercel": "^32.0.0"
+  "keywords": [
+    "oauth",
+    "patreon",
+    "authentication",
+    "sketchshaper"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "dotenv": "^17.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "your-repository-url"
   }
 }

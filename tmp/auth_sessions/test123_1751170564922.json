@@ -1,6 +1,0 @@
-{
-  "status": "completed",
-  "code": "test",
-  "timestamp": 1751170654242,
-  "fallback_reason": "Token exchange failed: 401 {\"error\":\"invalid_grant\",\"error_description\":\"Invalid \\\"code\\\" in request.\"}"
-}

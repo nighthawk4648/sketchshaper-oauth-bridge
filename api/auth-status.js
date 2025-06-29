@@ -1,225 +1,372 @@
-export default async function handler(req, res) {
-  // Set CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+// api/auth-status.js - Enhanced endpoint for SketchUp extension to poll authentication status
+import fs from 'fs';
+import path from 'path';
+
+const SESSIONS_DIR = process.env.VERCEL ? '/tmp/auth_sessions' : './tmp/auth_sessions';
+const SESSION_TIMEOUT = 15 * 60 * 1000; // 15 minutes (match callback.js)
+
+// Enhanced state validation matching callback.js
+function validateState(state) {
+  console.log('Validating state parameter:', state);
   
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+  if (!state || typeof state !== 'string') {
+    console.log('State validation failed: Missing or invalid type');
+    return false;
   }
   
-  if (req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' });
+  // More flexible regex pattern - allow alphanumeric and common separators
+  if (!/^[a-fA-F0-9]+_\d+$/.test(state)) {
+    console.log('State validation failed: Pattern mismatch. Expected format: [hex]_[timestamp]');
+    console.log('Actual state format:', state);
+    return false;
   }
   
-  const { state } = req.query;
-  
-  if (!state) {
-    return res.status(400).json({
-      status: 'error',
-      error: 'Missing state parameter'
-    });
+  const parts = state.split('_');
+  if (parts.length !== 2) {
+    console.log('State validation failed: Invalid format - expected exactly one underscore');
+    return false;
   }
   
-  // Add validation for state parameter format
-  if (typeof state !== 'string' || state.length < 1) {
-    return res.status(400).json({
-      status: 'error',
-      error: 'Invalid state parameter format'
-    });
+  const timestamp = parseInt(parts[1]);
+  const now = Date.now();
+  const maxAge = 30 * 60 * 1000; // 30 minutes
+  
+  console.log('Timestamp validation:', {
+    stateTimestamp: timestamp,
+    currentTime: now,
+    age: now - timestamp,
+    maxAge: maxAge,
+    isValid: timestamp > 0 && timestamp <= now && (now - timestamp) <= maxAge
+  });
+  
+  if (timestamp <= 0) {
+    console.log('State validation failed: Invalid timestamp (not positive)');
+    return false;
   }
   
+  if (timestamp > now) {
+    console.log('State validation failed: Timestamp is in the future');
+    return false;
+  }
+  
+  if ((now - timestamp) > maxAge) {
+    console.log('State validation failed: Timestamp too old');
+    return false;
+  }
+  
+  console.log('State validation passed');
+  return true;
+}
+
+// Alternative validation function for debugging (matching callback.js)
+function validateStateAlternative(state) {
+  console.log('Alternative state validation for:', state);
+  
+  if (!state || typeof state !== 'string') {
+    return false;
+  }
+  
+  // More lenient validation - just check if it's not empty and contains reasonable characters
+  if (state.length < 10 || state.length > 100) {
+    console.log('State length validation failed:', state.length);
+    return false;
+  }
+  
+  // Allow any alphanumeric state with common separators
+  if (!/^[a-zA-Z0-9_-]+$/.test(state)) {
+    console.log('State character validation failed');
+    return false;
+  }
+  
+  console.log('Alternative state validation passed');
+  return true;
+}
+
+// Check if sessions directory exists and is accessible
+function checkSessionsDirectory() {
   try {
-    // Ensure auth sessions directory exists
-    await ensureAuthDirectory();
-    
-    // Run cleanup of expired sessions
-    await cleanupExpiredSessions();
-    
-    // Retrieve auth data
-    const authData = await getAuthData(state);
-    
-    if (!authData) {
-      return res.status(404).json({
-        status: 'pending',
-        message: 'Authentication not completed yet or session expired'
-      });
+    if (!fs.existsSync(SESSIONS_DIR)) {
+      console.log('Sessions directory does not exist, attempting to create:', SESSIONS_DIR);
+      // Try to create the directory if it doesn't exist
+      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+      console.log('Sessions directory created successfully');
     }
     
-    // Return the auth data
-    return res.status(200).json(authData);
-    
+    // Test read permissions
+    fs.readdirSync(SESSIONS_DIR);
+    return true;
   } catch (error) {
-    console.error('Auth status check error:', error);
-    return res.status(500).json({
-      status: 'error',
-      error: 'Internal server error',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    console.error('Failed to check/create sessions directory:', error);
+    return false;
   }
 }
 
-// Helper function to ensure auth directory exists
-async function ensureAuthDirectory() {
-  const fs = await import('fs/promises');
-  const path = await import('path');
-  
+// Safe file operations
+function safeReadFile(filePath) {
   try {
-    const authDir = '/tmp/auth_sessions';
-    await fs.mkdir(authDir, { recursive: true });
+    return fs.readFileSync(filePath, 'utf8');
   } catch (error) {
-    console.error('Error creating auth directory:', error);
-    throw error;
+    console.error('Failed to read file:', filePath, error.message);
+    return null;
   }
 }
 
-// Helper functions for auth data storage in /tmp/auth_sessions
-async function getAuthData(state) {
-  const fs = await import('fs/promises');
-  const path = await import('path');
-  
+function safeUnlinkFile(filePath) {
   try {
-    // Sanitize the state parameter to prevent path traversal
-    const sanitizedState = state.replace(/[^a-zA-Z0-9_-]/g, '');
-    if (sanitizedState !== state) {
-      console.warn('State parameter contained invalid characters:', state);
-      return null;
-    }
-    
-    const sessionFile = path.join('/tmp/auth_sessions', `${sanitizedState}.json`);
-    
-    // Check if file exists first
-    try {
-      await fs.access(sessionFile);
-    } catch (accessError) {
-      if (accessError.code === 'ENOENT') {
-        console.log(`Session file not found: ${sessionFile}`);
-        return null;
-      }
-      throw accessError;
-    }
-    
-    const data = await fs.readFile(sessionFile, 'utf8');
-    const sessionData = JSON.parse(data);
-    
-    // Validate session data structure
-    if (!sessionData.expiresAt || typeof sessionData.expiresAt !== 'number') {
-      console.warn('Invalid session data structure:', sessionData);
-      await deleteAuthData(state);
-      return null;
-    }
-    
-    // Check if session has expired
-    if (Date.now() > sessionData.expiresAt) {
-      console.log(`Session expired for state: ${state}`);
-      await deleteAuthData(state);
-      return null;
-    }
-    
-    console.log(`Found valid session for state: ${state}`);
-    return sessionData;
-    
+    fs.unlinkSync(filePath);
+    return true;
   } catch (error) {
-    if (error.code === 'ENOENT') {
-      console.log(`Session file not found for state: ${state}`);
-      return null;
-    }
-    console.error('Error reading auth data:', error);
-    throw error;
+    console.error('Failed to delete file:', filePath, error.message);
+    return false;
   }
 }
 
-async function deleteAuthData(state) {
-  const fs = await import('fs/promises');
-  const path = await import('path');
-  
+function safeStatFile(filePath) {
   try {
-    const sanitizedState = state.replace(/[^a-zA-Z0-9_-]/g, '');
-    const sessionFile = path.join('/tmp/auth_sessions', `${sanitizedState}.json`);
-    await fs.unlink(sessionFile);
-    console.log(`Deleted auth session: ${sessionFile}`);
+    return fs.statSync(filePath);
   } catch (error) {
-    if (error.code !== 'ENOENT') {
-      console.error('Error deleting auth data:', error);
-    }
-    // Ignore ENOENT - file already doesn't exist
+    return null;
   }
 }
 
-// Helper function to cleanup expired sessions
-async function cleanupExpiredSessions() {
-  const fs = await import('fs/promises');
-  const path = await import('path');
-  
+// Clean up expired session files
+function cleanupExpiredSessions() {
   try {
-    const sessionsDir = '/tmp/auth_sessions';
-    
-    // Check if directory exists
-    try {
-      await fs.access(sessionsDir);
-    } catch (error) {
-      if (error.code === 'ENOENT') {
-        console.log('Auth sessions directory does not exist yet');
-        return;
-      }
-      throw error;
+    if (!fs.existsSync(SESSIONS_DIR)) {
+      return;
     }
-    
-    const files = await fs.readdir(sessionsDir);
+
+    const files = fs.readdirSync(SESSIONS_DIR);
     const now = Date.now();
-    
+    let cleanedCount = 0;
+
     for (const file of files) {
       if (!file.endsWith('.json')) continue;
       
-      try {
-        const filePath = path.join(sessionsDir, file);
-        const data = await fs.readFile(filePath, 'utf8');
-        const sessionData = JSON.parse(data);
-        
-        if (sessionData.expiresAt && now > sessionData.expiresAt) {
-          await fs.unlink(filePath);
-          console.log(`Cleaned up expired session: ${file}`);
-        }
-      } catch (error) {
-        // If we can't read/parse the file, delete it
-        try {
-          await fs.unlink(path.join(sessionsDir, file));
-          console.log(`Cleaned up corrupted session file: ${file}`);
-        } catch (unlinkError) {
-          console.error('Error cleaning up corrupted file:', unlinkError);
+      const filePath = path.join(SESSIONS_DIR, file);
+      const stats = safeStatFile(filePath);
+      
+      if (!stats) {
+        // File doesn't exist or can't be accessed, try to remove
+        safeUnlinkFile(filePath);
+        cleanedCount++;
+        continue;
+      }
+      
+      const fileAge = now - stats.mtime.getTime();
+      
+      // Clean up files older than session timeout
+      if (fileAge > SESSION_TIMEOUT) {
+        if (safeUnlinkFile(filePath)) {
+          cleanedCount++;
+          console.log('Cleaned up expired session file:', file);
         }
       }
     }
-  } catch (error) {
-    if (error.code !== 'ENOENT') {
-      console.error('Error during session cleanup:', error);
+
+    if (cleanedCount > 0) {
+      console.log(`Cleaned up ${cleanedCount} expired session files`);
     }
+  } catch (error) {
+    console.error('Session cleanup error:', error);
   }
 }
 
-// Helper function to store auth data (you'll need this in your auth initiation)
-export async function storeAuthData(state, authData, expirationMinutes = 10) {
-  const fs = await import('fs/promises');
-  const path = await import('path');
-  
+export default async function handler(req, res) {
+  console.log('=== Auth Status Handler Started ===');
+  console.log('Method:', req.method);
+  console.log('URL:', req.url);
+  console.log('Query parameters:', req.query);
+  console.log('Environment:', process.env.VERCEL ? 'Vercel' : 'Local');
+
   try {
-    await ensureAuthDirectory();
+    // Set CORS headers (matching callback.js)
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, User-Agent');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+    if (req.method === 'OPTIONS') {
+      return res.status(200).end();
+    }
+
+    if (req.method !== 'GET') {
+      console.error('Invalid method:', req.method);
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+    const { state } = req.query;
+
+    if (!state) {
+      console.error('Missing state parameter');
+      return res.status(400).json({ 
+        status: 'error',
+        error: 'State parameter required' 
+      });
+    }
+
+    // Validate state parameter using the same logic as callback.js
+    let isStateValid = validateState(state);
+    let validationMethod = 'primary';
     
-    const sanitizedState = state.replace(/[^a-zA-Z0-9_-]/g, '');
-    const sessionFile = path.join('/tmp/auth_sessions', `${sanitizedState}.json`);
+    // If primary validation fails, try alternative validation
+    if (!isStateValid) {
+      console.log('Primary state validation failed, trying alternative validation...');
+      isStateValid = validateStateAlternative(state);
+      validationMethod = 'alternative';
+      
+      if (!isStateValid) {
+        console.error('Both state validations failed');
+        return res.status(400).json({
+          status: 'error',
+          error: 'Invalid authentication state',
+          debug: {
+            state: state,
+            stateLength: state.length,
+            statePattern: /^[a-fA-F0-9]+_\d+$/.test(state),
+            alternativePattern: /^[a-zA-Z0-9_-]+$/.test(state),
+            timestamp: new Date().toISOString()
+          }
+        });
+      }
+    }
+
+    console.log(`State validation passed using ${validationMethod} method`);
+
+    // Check if sessions directory exists
+    if (!checkSessionsDirectory()) {
+      console.error('Sessions directory not accessible');
+      return res.status(500).json({
+        status: 'error',
+        error: 'Server configuration error - session storage not accessible'
+      });
+    }
+
+    // Clean up expired sessions periodically (but don't fail if it errors)
+    try {
+      cleanupExpiredSessions();
+    } catch (cleanupError) {
+      console.error('Cleanup failed but continuing:', cleanupError);
+    }
+
+    const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
+    console.log('Looking for session file:', sessionFile);
+
+    // Check if session file exists
+    if (!fs.existsSync(sessionFile)) {
+      console.log('Session file not found - authentication still pending');
+      return res.status(200).json({ 
+        status: 'pending',
+        message: 'Authentication session not found or still pending',
+        debug: {
+          sessionFile: sessionFile,
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+
+    // Read and parse session data
+    const fileContent = safeReadFile(sessionFile);
+    if (!fileContent) {
+      console.error('Failed to read session file:', sessionFile);
+      
+      // Try to remove corrupted session file
+      safeUnlinkFile(sessionFile);
+      
+      return res.status(500).json({
+        status: 'error',
+        error: 'Failed to read session data'
+      });
+    }
+
+    let sessionData;
+    try {
+      sessionData = JSON.parse(fileContent);
+    } catch (parseError) {
+      console.error('Failed to parse session file:', parseError);
+      
+      // Try to remove corrupted session file
+      safeUnlinkFile(sessionFile);
+      
+      return res.status(500).json({
+        status: 'error',
+        error: 'Corrupted session data'
+      });
+    }
+
+    // Check session age
+    const now = Date.now();
+    const sessionAge = now - (sessionData.timestamp || 0);
     
-    const sessionData = {
-      ...authData,
-      expiresAt: Date.now() + (expirationMinutes * 60 * 1000),
-      createdAt: Date.now()
+    if (sessionAge > SESSION_TIMEOUT) {
+      console.log('Session expired, age:', sessionAge);
+      
+      // Clean up expired session
+      safeUnlinkFile(sessionFile);
+      
+      return res.status(200).json({ 
+        status: 'expired',
+        message: 'Authentication session expired',
+        debug: {
+          sessionAge: sessionAge,
+          timeout: SESSION_TIMEOUT
+        }
+      });
+    }
+
+    // Prepare response based on session status
+    const response = {
+      status: sessionData.status,
+      timestamp: sessionData.timestamp
     };
-    
-    await fs.writeFile(sessionFile, JSON.stringify(sessionData, null, 2));
-    console.log(`Stored auth session: ${sessionFile}`);
-    
-    return sessionData;
+
+    if (sessionData.status === 'completed') {
+      console.log('Session completed, preparing response...');
+      
+      // Include authentication data
+      if (sessionData.access_token) {
+        response.access_token = sessionData.access_token;
+        response.refresh_token = sessionData.refresh_token;
+        response.expires_in = sessionData.expires_in;
+        response.token_type = sessionData.token_type;
+        console.log('Returning access token to client');
+      } else if (sessionData.code) {
+        // Fallback case where only code is available
+        response.code = sessionData.code;
+        response.fallback_reason = sessionData.fallback_reason;
+        console.log('Returning authorization code for client-side exchange');
+      }
+      
+      response.state = state;
+      
+      // Clean up the session after successful retrieval
+      if (safeUnlinkFile(sessionFile)) {
+        console.log('Session file cleaned up after successful retrieval');
+      }
+      
+    } else if (sessionData.status === 'error') {
+      response.error = sessionData.error;
+      console.log('Returning error status:', sessionData.error);
+      
+      // Clean up error sessions too
+      if (safeUnlinkFile(sessionFile)) {
+        console.log('Error session file cleaned up');
+      }
+    }
+
+    console.log('Auth status response prepared for state:', state, 'Status:', sessionData.status);
+    return res.status(200).json(response);
+
   } catch (error) {
-    console.error('Error storing auth data:', error);
-    throw error;
+    console.error('=== Auth Status Handler Error ===');
+    console.error('Error message:', error.message);
+    console.error('Error stack:', error.stack);
+    
+    return res.status(500).json({ 
+      status: 'error',
+      error: 'Internal server error',
+      message: error.message,
+      timestamp: new Date().toISOString()
+    });
   }
 }
