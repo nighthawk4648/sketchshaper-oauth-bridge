@@ -1,24 +1,17 @@
 {
-  "name": "sketchshaper-oauth-bridge",
+  "name": "patreon-auth-server",
   "version": "1.0.0",
-  "description": "OAuth bridge for SketchShaper extension",
-  "type": "module",
-  "main": "server.js",
+  "description": "Patreon OAuth authentication server for SketchShaper",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js",
-    "local": "nodemon server.js",
-    "test": "node test-server.js",
-    "build": "echo 'No build step required'"
+    "dev": "vercel dev",
+    "build": "vercel build",
+    "deploy": "vercel --prod"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5"
+    
   },
   "devDependencies": {
-    "nodemon": "^3.0.1",
     "vercel": "^32.0.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
   }
 }

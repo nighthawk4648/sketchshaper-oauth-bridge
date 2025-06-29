@@ -1,11 +1,16 @@
 {
-  "version": 2,
   "functions": {
     "api/callback.js": {
       "maxDuration": 30
     },
     "api/auth-status.js": {
+      "maxDuration": 10
+    },
+    "api/cleanup.js": {
       "maxDuration": 15
+    },
+    "api/test.js": {
+      "maxDuration": 5
     }
   },
   "rewrites": [
@@ -14,35 +19,12 @@
       "destination": "/api/callback"
     },
     {
-      "source": "/auth-status",
-      "destination": "/api/auth-status"
-    }
-  ],
-  "headers": [
+      "source": "/cleanup",
+      "destination": "/api/cleanup"
+    },
     {
-      "source": "/api/(.*)",
-      "headers": [
-        {
-          "key": "Access-Control-Allow-Origin",
-          "value": "*"
-        },
-        {
-          "key": "Access-Control-Allow-Methods",
-          "value": "GET, POST, OPTIONS"
-        },
-        {
-          "key": "Access-Control-Allow-Headers",
-          "value": "Content-Type, User-Agent, Authorization"
-        },
-        {
-          "key": "Cache-Control",
-          "value": "no-cache, no-store, must-revalidate"
-        }
-      ]
+      "source": "/test",
+      "destination": "/api/test"
     }
-  ],
-  "buildCommand": null,
-  "devCommand": null,
-  "cleanUrls": true,
-  "trailingSlash": false
+  ]
 }
