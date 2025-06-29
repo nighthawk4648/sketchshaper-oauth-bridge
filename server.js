@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3001;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cors({
-  origin: ['https://api2.sketchshaper.com', 'http://localhost:3000'],
+  origin: ['https://api2.sketchshaper.com', 'http://localhost:3000', 'http://localhost:3001'],
   credentials: true
 }));
 
@@ -176,16 +176,18 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Start OAuth flow
+// Start OAuth flow - NOW ACCEPTS STATE FROM EXTENSION
 app.get('/auth', async (req, res) => {
   try {
-    const state = generateState();
+    // Use state from query parameter if provided (from extension), otherwise generate new one
+    const state = req.query.state || generateState();
     
-    // Save initial session
+    // Save initial session with the state
     await saveSession(state, {
       status: 'pending',
       userAgent: req.headers['user-agent'],
-      ip: req.ip
+      ip: req.ip,
+      extensionInitiated: !!req.query.state // Track if extension initiated
     });
 
     // Build Patreon OAuth URL
@@ -196,7 +198,7 @@ app.get('/auth', async (req, res) => {
     authUrl.searchParams.set('state', state);
     authUrl.searchParams.set('scope', 'identity identity.memberships');
 
-    console.log(`Starting OAuth flow for state: ${state}`);
+    console.log(`Starting OAuth flow for state: ${state} (Extension: ${!!req.query.state})`);
     res.redirect(authUrl.toString());
     
   } catch (error) {
@@ -213,21 +215,25 @@ app.get('/callback', async (req, res) => {
 
   if (error) {
     console.error('OAuth error:', error);
-    await updateSession(state, {
-      status: 'error',
-      error: error,
-      completedAt: Date.now()
-    });
+    if (state) {
+      await updateSession(state, {
+        status: 'error',
+        error: error,
+        completedAt: Date.now()
+      });
+    }
     return res.send(getCallbackHtml('error', `Authentication failed: ${error}`));
   }
 
   if (!code || !state) {
     console.error('Missing code or state in callback');
-    await updateSession(state, {
-      status: 'error',
-      error: 'Missing authorization code',
-      completedAt: Date.now()
-    });
+    if (state) {
+      await updateSession(state, {
+        status: 'error',
+        error: 'Missing authorization code',
+        completedAt: Date.now()
+      });
+    }
     return res.send(getCallbackHtml('error', 'Invalid callback parameters'));
   }
 
@@ -316,6 +322,44 @@ app.get('/auth-status', async (req, res) => {
       status: 'error', 
       error: 'Failed to check authentication status' 
     });
+  }
+});
+
+// Get recent sessions (for extension to find lost state)
+app.get('/recent-sessions', async (req, res) => {
+  try {
+    const files = await fs.readdir(SESSIONS_DIR);
+    const recentSessions = [];
+    const cutoffTime = Date.now() - (5 * 60 * 1000); // Last 5 minutes
+    
+    for (const file of files) {
+      if (!file.endsWith('.json')) continue;
+      
+      const sessionFile = path.join(SESSIONS_DIR, file);
+      const stat = await fs.stat(sessionFile);
+      
+      if (stat.mtime.getTime() > cutoffTime) {
+        const data = await fs.readFile(sessionFile, 'utf8');
+        const session = JSON.parse(data);
+        const state = file.replace('.json', '');
+        
+        recentSessions.push({
+          state,
+          status: session.status,
+          createdAt: session.createdAt,
+          extensionInitiated: session.extensionInitiated
+        });
+      }
+    }
+    
+    // Sort by creation time, most recent first
+    recentSessions.sort((a, b) => b.createdAt - a.createdAt);
+    
+    res.json(recentSessions);
+    
+  } catch (error) {
+    console.error('Error getting recent sessions:', error);
+    res.status(500).json({ error: 'Failed to get recent sessions' });
   }
 });
 
