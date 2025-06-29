@@ -1,7 +1,6 @@
+// simple-server.js - Local test server for development
 import http from 'http';
 import url from 'url';
-import fs from 'fs';
-import path from 'path';
 
 // Import your handlers
 import callbackHandler from './api/callback.js';
@@ -9,7 +8,7 @@ import authStatusHandler from './api/auth-status.js';
 
 const PORT = 3000;
 
-// Simple request/response adapter
+// Create mock Vercel request/response objects
 function createMockVercelObjects(req, res) {
   const parsedUrl = url.parse(req.url, true);
   
@@ -78,7 +77,7 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ 
         status: 'ok', 
         timestamp: new Date().toISOString(),
-        environment: 'local-simple'
+        environment: 'local-development'
       }));
     } else {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -95,11 +94,16 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log('🚀 Simple test server running on http://localhost:' + PORT);
-  console.log('📍 Test endpoints:');
+  console.log('🚀 Local development server running on http://localhost:' + PORT);
+  console.log('📍 Available endpoints:');
   console.log('  http://localhost:' + PORT + '/health');
-  console.log('  http://localhost:' + PORT + '/auth-status?state=test123_' + Date.now());
-  console.log('  http://localhost:' + PORT + '/callback?code=test&state=test123_' + Date.now());
+  console.log('  http://localhost:' + PORT + '/auth-status?state=<your-state>');
+  console.log('  http://localhost:' + PORT + '/callback?code=<auth-code>&state=<your-state>');
+  console.log('');
+  console.log('📝 Make sure to set your environment variables:');
+  console.log('  PATREON_CLIENT_ID=<your-client-id>');
+  console.log('  PATREON_CLIENT_SECRET=<your-client-secret>');
+  console.log('  PATREON_REDIRECT_URI=https://api2.sketchshaper.com/callback');
 });
 
 server.on('error', (error) => {

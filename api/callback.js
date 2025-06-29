@@ -1,11 +1,11 @@
-// api/callback.js - Enhanced Patreon OAuth callback handler with better error handling
+// api/callback.js - Patreon OAuth callback handler
 import fs from 'fs';
 import path from 'path';
 
 const SESSIONS_DIR = process.env.VERCEL ? '/tmp/auth_sessions' : './tmp/auth_sessions';
 const SESSION_TIMEOUT = 15 * 60 * 1000; // 15 minutes
 
-// Ensure sessions directory exists with better error handling
+// Ensure sessions directory exists
 function ensureSessionsDirectory() {
   try {
     if (!fs.existsSync(SESSIONS_DIR)) {
@@ -25,7 +25,7 @@ function ensureSessionsDirectory() {
   }
 }
 
-// Enhanced state validation with detailed logging
+// Validate state parameter
 function validateState(state) {
   console.log('Validating state parameter:', state);
   
@@ -34,16 +34,15 @@ function validateState(state) {
     return false;
   }
   
-  // More flexible regex pattern - allow alphanumeric and common separators
+  // Check for hex_timestamp pattern
   if (!/^[a-fA-F0-9]+_\d+$/.test(state)) {
     console.log('State validation failed: Pattern mismatch. Expected format: [hex]_[timestamp]');
-    console.log('Actual state format:', state);
     return false;
   }
   
   const parts = state.split('_');
   if (parts.length !== 2) {
-    console.log('State validation failed: Invalid format - expected exactly one underscore');
+    console.log('State validation failed: Invalid format');
     return false;
   }
   
@@ -51,26 +50,8 @@ function validateState(state) {
   const now = Date.now();
   const maxAge = 30 * 60 * 1000; // 30 minutes
   
-  console.log('Timestamp validation:', {
-    stateTimestamp: timestamp,
-    currentTime: now,
-    age: now - timestamp,
-    maxAge: maxAge,
-    isValid: timestamp > 0 && timestamp <= now && (now - timestamp) <= maxAge
-  });
-  
-  if (timestamp <= 0) {
-    console.log('State validation failed: Invalid timestamp (not positive)');
-    return false;
-  }
-  
-  if (timestamp > now) {
-    console.log('State validation failed: Timestamp is in the future');
-    return false;
-  }
-  
-  if ((now - timestamp) > maxAge) {
-    console.log('State validation failed: Timestamp too old');
+  if (timestamp <= 0 || timestamp > now || (now - timestamp) > maxAge) {
+    console.log('State validation failed: Invalid or expired timestamp');
     return false;
   }
   
@@ -78,7 +59,7 @@ function validateState(state) {
   return true;
 }
 
-// Alternative validation function for debugging
+// Alternative validation for non-standard state formats
 function validateStateAlternative(state) {
   console.log('Alternative state validation for:', state);
   
@@ -86,13 +67,11 @@ function validateStateAlternative(state) {
     return false;
   }
   
-  // More lenient validation - just check if it's not empty and contains reasonable characters
   if (state.length < 10 || state.length > 100) {
     console.log('State length validation failed:', state.length);
     return false;
   }
   
-  // Allow any alphanumeric state with common separators
   if (!/^[a-zA-Z0-9_-]+$/.test(state)) {
     console.log('State character validation failed');
     return false;
@@ -102,13 +81,13 @@ function validateStateAlternative(state) {
   return true;
 }
 
-// Exchange authorization code for tokens with better error handling
+// Exchange authorization code for tokens
 async function exchangeCodeForTokens(code) {
-  const PATREON_CLIENT_ID = process.env.PATREON_CLIENT_ID || "GhVd_dyhxHNkxgmYCAAjuP-9ohELe-aVI-BaxjeuQ3Shpo1NBEBrveQ9OHiKLDEe";
-  const PATREON_CLIENT_SECRET = process.env.PATREON_CLIENT_SECRET || "NiL8Ip6NzIeAcsIjZ-hk_61VRt9ONo0JVBvxZsJi2tQ-OUedCuRHKCJTgyoOFFJj";
+  const PATREON_CLIENT_ID = process.env.PATREON_CLIENT_ID; "GhVd_dyhxHNkxgmYCAAjuP-9ohELe-aVI-BaxjeuQ3Shpo1NBEBrveQ9OHiKLDEe"
+  const PATREON_CLIENT_SECRET = process.env.PATREON_CLIENT_SECRET;"NiL8Ip6NzIeAcsIjZ-hk_61VRt9ONo0JVBvxZsJi2tQ-OUedCuRHKCJTgyoOFFJj"
   const PATREON_REDIRECT_URI = process.env.PATREON_REDIRECT_URI || "https://api2.sketchshaper.com/callback";
   
-  if (!PATREON_CLIENT_ID || !PATREON_CLIENT_SECRET || !PATREON_REDIRECT_URI) {
+  if (!PATREON_CLIENT_ID || !PATREON_CLIENT_SECRET) {
     throw new Error('Missing Patreon OAuth configuration');
   }
 
@@ -124,7 +103,7 @@ async function exchangeCodeForTokens(code) {
     console.log('Making token exchange request to Patreon...');
     
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000); // Increased timeout
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
 
     const response = await fetch('https://www.patreon.com/api/oauth2/token', {
       method: 'POST',
@@ -148,7 +127,7 @@ async function exchangeCodeForTokens(code) {
     }
 
     const data = await response.json();
-    console.log('Token exchange successful, received access_token:', !!data.access_token);
+    console.log('Token exchange successful');
     
     if (!data.access_token) {
       throw new Error('No access token in response');
@@ -165,7 +144,7 @@ async function exchangeCodeForTokens(code) {
   }
 }
 
-// Safe file operations with error handling
+// Safe file operations
 function safeWriteFile(filePath, data) {
   try {
     fs.writeFileSync(filePath, data);
@@ -235,7 +214,7 @@ function generateSuccessPage() {
   `;
 }
 
-// Generate error page with more debugging info
+// Generate error page
 function generateErrorPage(errorMessage, debugInfo = null) {
   const debugSection = debugInfo ? `
     <div style="margin-top: 20px; padding: 15px; background: #f7fafc; border-radius: 8px; text-align: left; font-size: 12px; color: #4a5568;">
@@ -307,7 +286,6 @@ export default async function handler(req, res) {
   console.log('Method:', req.method);
   console.log('URL:', req.url);
   console.log('Query parameters:', req.query);
-  console.log('Environment:', process.env.VERCEL ? 'Vercel' : 'Local');
 
   try {
     // Set CORS headers
@@ -331,7 +309,6 @@ export default async function handler(req, res) {
     if (error) {
       console.error('OAuth error received:', error, error_description);
       
-      // Try to ensure sessions directory exists for error storage
       if (ensureSessionsDirectory() && state) {
         const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
         const sessionData = {
@@ -343,49 +320,32 @@ export default async function handler(req, res) {
         safeWriteFile(sessionFile, JSON.stringify(sessionData, null, 2));
       }
 
-      return res.status(400).send(generateErrorPage(error_description || error, {
-        oauthError: error,
-        state: state,
-        hasCode: !!code,
-        timestamp: new Date().toISOString()
-      }));
+      return res.status(400).send(generateErrorPage(error_description || error));
     }
 
     // Validate required parameters
     if (!code || !state) {
       console.error('Missing required parameters - code:', !!code, 'state:', !!state);
-      return res.status(400).send(generateErrorPage('Missing authentication parameters', {
-        hasCode: !!code,
-        hasState: !!state,
-        state: state,
-        timestamp: new Date().toISOString()
-      }));
+      return res.status(400).send(generateErrorPage('Missing authentication parameters'));
     }
 
-    // Try primary validation first
+    // Validate state parameter
     let isStateValid = validateState(state);
     
-    // If primary validation fails, try alternative validation
     if (!isStateValid) {
       console.log('Primary state validation failed, trying alternative validation...');
       isStateValid = validateStateAlternative(state);
       
       if (!isStateValid) {
         console.error('Both state validations failed for state:', state);
-        return res.status(400).send(generateErrorPage('Invalid authentication state', {
-          state: state,
-          stateLength: state.length,
-          statePattern: /^[a-fA-F0-9]+_\d+$/.test(state),
-          alternativePattern: /^[a-zA-Z0-9_-]+$/.test(state),
-          timestamp: new Date().toISOString()
-        }));
+        return res.status(400).send(generateErrorPage('Invalid authentication state'));
       }
     }
 
     // Ensure sessions directory exists
     if (!ensureSessionsDirectory()) {
       console.error('Cannot create/access sessions directory');
-      return res.status(500).send(generateErrorPage('Server configuration error - cannot access session storage'));
+      return res.status(500).send(generateErrorPage('Server configuration error'));
     }
 
     const sessionFile = path.join(SESSIONS_DIR, `${state}.json`);
@@ -394,7 +354,7 @@ export default async function handler(req, res) {
     let sessionData;
     
     try {
-      console.log('Attempting token exchange for code...');
+      console.log('Attempting token exchange...');
       const tokenData = await exchangeCodeForTokens(code);
       
       sessionData = {
@@ -406,7 +366,7 @@ export default async function handler(req, res) {
         timestamp: Date.now()
       };
       
-      console.log('Token exchange successful, storing session data...');
+      console.log('Token exchange successful');
       
     } catch (tokenError) {
       console.error('Token exchange failed:', tokenError.message);
@@ -419,7 +379,7 @@ export default async function handler(req, res) {
         fallback_reason: tokenError.message
       };
       
-      console.log('Storing fallback session data with code...');
+      console.log('Storing fallback session data with code');
     }
 
     // Store session data
@@ -429,10 +389,7 @@ export default async function handler(req, res) {
       return res.status(500).send(generateErrorPage('Failed to store authentication session'));
     }
 
-    console.log('Session data stored successfully at:', sessionFile);
-    console.log('Session status:', sessionData.status);
-    console.log('Has access_token:', !!sessionData.access_token);
-    console.log('Has code:', !!sessionData.code);
+    console.log('Session data stored successfully');
 
     // Return success page
     return res.status(200).send(generateSuccessPage());
@@ -442,10 +399,6 @@ export default async function handler(req, res) {
     console.error('Error message:', error.message);
     console.error('Error stack:', error.stack);
     
-    return res.status(500).send(generateErrorPage('Server error occurred', {
-      error: error.message,
-      timestamp: new Date().toISOString(),
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    }));
+    return res.status(500).send(generateErrorPage('Server error occurred'));
   }
 }
